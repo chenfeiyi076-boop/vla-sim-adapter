@@ -1,0 +1,54 @@
+===== DATE =====
+Sat Sep 12 04:55:17 UTC 2026
+
+===== HOST =====
+93b621dd2515
+Linux 93b621dd2515 5.4.0-216-generic #236-Ubuntu SMP Fri Apr 11 19:53:21 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux
+
+===== PYTHON =====
+/data/x2227/miniforge3/envs/vla-adapter/bin/python
+Python 3.10.16
+
+===== GPU =====
+Sat Sep 12 04:55:17 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.133.07             Driver Version: 570.133.07     CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100-PCIE-40GB          Off |   00000000:31:00.0 Off |                    0 |
+| N/A   47C    P0             55W /  250W |      23MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA A100-PCIE-40GB          Off |   00000000:4B:00.0 Off |                    0 |
+| N/A   51C    P0             63W /  250W |      23MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA A100-PCIE-40GB          Off |   00000000:B1:00.0 Off |                    0 |
+| N/A   46C    P0             64W /  250W |      23MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA A100-PCIE-40GB          Off |   00000000:CA:00.0 Off |                    0 |
+| N/A   56C    P0             72W /  250W |      23MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
++-----------------------------------------------------------------------------------------+
+
+===== NVCC =====
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2022 NVIDIA Corporation
+Built on Wed_Sep_21_10:33:58_PDT_2022
+Cuda compilation tools, release 11.8, V11.8.89
+Build cuda_11.8.r11.8/compiler.31833905_0
+
+===== DISK =====
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sdb1        22T   22T  744G  97% /data/x2227

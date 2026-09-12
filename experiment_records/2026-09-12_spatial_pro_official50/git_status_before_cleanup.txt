@@ -1,0 +1,40 @@
+ M experiments/robot/libero/run_libero_eval.py
+ M pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/README.md
+ M prismatic/models/backbones/llm/prompting/__pycache__/__init__.cpython-310.pyc
+ M prismatic/models/backbones/llm/prompting/__pycache__/base_prompter.cpython-310.pyc
+ M prismatic/models/backbones/llm/prompting/__pycache__/llama2_chat_prompter.cpython-310.pyc
+ M prismatic/models/backbones/llm/prompting/__pycache__/mistral_instruct_prompter.cpython-310.pyc
+ M prismatic/models/backbones/llm/prompting/__pycache__/phi_prompter.cpython-310.pyc
+ M prismatic/models/backbones/llm/prompting/__pycache__/qwen_prompter.cpython-310.pyc
+ M prismatic/models/backbones/llm/prompting/__pycache__/vicuna_v15_prompter.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/__pycache__/__init__.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/__pycache__/dataset.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/__pycache__/obs_transforms.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/__pycache__/traj_transforms.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/oxe/__pycache__/__init__.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/oxe/__pycache__/configs.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/oxe/__pycache__/materialize.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/oxe/__pycache__/mixtures.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/oxe/__pycache__/transforms.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/oxe/utils/__pycache__/droid_utils.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/utils/__pycache__/__init__.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/utils/__pycache__/data_utils.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/utils/__pycache__/goal_relabeling.cpython-310.pyc
+ M prismatic/vla/datasets/rlds/utils/__pycache__/task_augmentation.cpython-310.pyc
+ M vla_adapter.egg-info/PKG-INFO
+ M vla_adapter.egg-info/SOURCES.txt
+ M vla_adapter.egg-info/requires.txt
+ M vla_adapter.egg-info/top_level.txt
+?? LIBERO-master.zip
+?? LIBERO/
+?? eval_logs/spatial50/
+?? experiment_records/
+?? experiments/logs/
+?? experiments/robot/libero/run_libero_eval.py.backup
+?? pretrained_models/LIBERO-Spatial-Pro/
+?? pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/.gitattributes
+?? pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/checkpoints/
+?? pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/config.json
+?? pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/config.yaml
+?? pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/prism-qwen25-extra-dinosiglip-224px+0_5b+stage-finetune+x7.jsonl
+?? pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b/run-metrics.jsonl

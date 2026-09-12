@@ -108,6 +108,8 @@ class GenerateConfig:
     task_suite_name: str = TaskSuite.LIBERO_SPATIAL  # Task suite
     num_steps_wait: int = 10                         # Number of steps to wait for objects to stabilize in sim
     num_trials_per_task: int = 50                    # Number of rollouts per task
+    task_start: int = 0                              # First task ID to evaluate (inclusive)
+    task_end: int = -1                               # Last task ID (exclusive); -1 means all tasks
     initial_states_path: str = "DEFAULT"             # "DEFAULT", or path to initial states JSON file
     env_img_res: int = 256                           # Resolution for environment images (not policy input resolution)
 
@@ -507,7 +509,14 @@ def eval_libero(cfg: GenerateConfig) -> float:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm(range(num_tasks)):
+    task_end = num_tasks if cfg.task_end < 0 else min(cfg.task_end, num_tasks)
+    assert 0 <= cfg.task_start < task_end <= num_tasks, (
+        f"Invalid task range: [{cfg.task_start}, {task_end}) for {num_tasks} tasks"
+    )
+
+    log_message(f"Evaluating task IDs: {list(range(cfg.task_start, task_end))}", log_file)
+
+    for task_id in tqdm.tqdm(range(cfg.task_start, task_end)):
         total_episodes, total_successes = run_task(
             cfg,
             task_suite,
