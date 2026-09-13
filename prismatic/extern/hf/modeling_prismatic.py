@@ -521,6 +521,49 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
             return torch.cat([labels[:, :1], projected_patch_labels, labels[:, 1:]], dim=1)
         return None
 
+    def encode_observation(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.Tensor,
+        pixel_values: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """Encode images and text without action queries, labels, or vocabulary logits.
+
+        Inputs use the existing Prismatic image preprocessing and token order.
+        ``attention_mask`` is [B, L], with 1/True for valid text tokens. Returns
+        the complete decoder sequence [B, T, C] and a boolean [B, T] mask
+        (True = valid). T and C are determined by the input and backbone.
+        Padding positions remain in ``features`` and must be masked downstream.
+        This method preserves gradients for subsequent joint training.
+        """
+        if input_ids.ndim != 2 or input_ids.shape[1] == 0:
+            raise ValueError("input_ids must have shape [B, L] with L > 0")
+        if attention_mask.shape != input_ids.shape:
+            raise ValueError("attention_mask must have exactly the same [B, L] shape as input_ids")
+        if attention_mask.device != input_ids.device:
+            raise ValueError("attention_mask and input_ids must be on the same device")
+        if not torch.all((attention_mask == 0) | (attention_mask == 1)):
+            raise ValueError("attention_mask must contain only 0/1 (False/True)")
+        if pixel_values.ndim != 4 or pixel_values.shape[0] != input_ids.shape[0]:
+            raise ValueError("pixel_values must have shape [B, C_images, height, width]")
+
+        input_embeddings = self.get_input_embeddings()(input_ids)
+        projected_patches = self._process_vision_features(pixel_values)
+        embeddings, feature_mask = self._build_multimodal_attention(
+            input_embeddings, projected_patches, attention_mask.bool()
+        )
+        # Qwen's decoder returns last_hidden_state directly; never call the
+        # CausalLM wrapper here, which would also allocate vocabulary logits.
+        decoder_output = self.get_decoder()(
+            inputs_embeds=embeddings,
+            attention_mask=feature_mask,
+            use_cache=False,
+            output_attentions=False,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+        return {"features": decoder_output.last_hidden_state, "feature_mask": feature_mask}
+
     # === Core Prismatic VLM `forward()` Logic ===
     def forward(
         self,
