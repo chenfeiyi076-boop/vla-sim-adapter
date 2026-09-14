@@ -139,3 +139,28 @@ def load_hybrid_checkpoint(path, training_model, optimizer, *, expected_metadata
         raise ValueError("Optimizer layout changed during restore")
     _validate_optimizer_state(optimizer.state_dict(), layout, payload["global_step"])
     return dict(format_version=1, global_step=payload["global_step"], metadata=copy.deepcopy(payload["metadata"]))
+
+
+def load_hybrid_model_checkpoint(path, encoder, flow_head, *, expected_metadata=None):
+    """Evaluation-only strict model load from a trusted local project checkpoint.
+
+    No optimizer is constructed or restored. Never load untrusted checkpoint files.
+    """
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    required = {"format_version", "global_step", "encoder", "flow_head", "metadata"}
+    if type(payload) is not dict or not required <= payload.keys():
+        raise ValueError("Malformed Hybrid model checkpoint: required keys missing")
+    if type(payload["format_version"]) is not int or payload["format_version"] != 1:
+        raise ValueError("Unsupported Hybrid checkpoint format_version")
+    _valid_step(payload["global_step"])
+    if type(payload["metadata"]) is not dict:
+        raise ValueError("Checkpoint metadata must be a plain dictionary")
+    if expected_metadata is not None:
+        if type(expected_metadata) is not dict:
+            raise ValueError("expected_metadata must be a plain dictionary")
+        for key, value in expected_metadata.items():
+            if key not in payload["metadata"] or payload["metadata"][key] != value:
+                raise ValueError(f"Checkpoint metadata mismatch: {key}")
+    encoder.load_state_dict(payload["encoder"], strict=True)
+    flow_head.load_state_dict(payload["flow_head"], strict=True)
+    return dict(format_version=1, global_step=payload["global_step"], metadata=copy.deepcopy(payload["metadata"]))

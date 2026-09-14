@@ -232,3 +232,42 @@ def test_no_forbidden_dependencies():
     calls = [n for n in ast.walk(runner) if isinstance(n, ast.Call)]
     assert sum(isinstance(n.func, ast.Name) and n.func.id == "save_hybrid_checkpoint" for n in calls) == 1
     assert sum(isinstance(n.func, ast.Name) and n.func.id == "iter" for n in calls) == 1
+
+
+def test_eval_only_full_state_without_optimizer(saved):
+    bundle, path = saved
+    model, _, _, _ = bundle
+    encoder = copy.deepcopy(model.module.encoder)
+    head = copy.deepcopy(model.module.flow_head)
+    with torch.no_grad():
+        for p in list(encoder.parameters()) + list(head.parameters()):
+            p.zero_()
+    info = checkpoint.load_hybrid_model_checkpoint(path, encoder, head, expected_metadata=META)
+    assert info == dict(format_version=1, global_step=3, metadata=META)
+    equal(encoder.state_dict(), model.module.encoder.state_dict())
+    equal(head.state_dict(), model.module.flow_head.state_dict())
+
+
+@pytest.mark.parametrize("bad", ["metadata", "version", "missing_schema", "encoder_key", "flow_shape"])
+def test_eval_loader_rejections(saved, bad):
+    bundle, path = saved
+    model, _, _, _ = bundle
+    encoder, head = model.module.encoder, model.module.flow_head
+    before = copy.deepcopy(model.module.state_dict())
+    payload = torch.load(path, weights_only=True)
+    expected = META
+    if bad == "metadata":
+        expected = META | {"world_size": 2}
+    elif bad == "version":
+        payload["format_version"] = 2
+    elif bad == "missing_schema":
+        del payload["metadata"]
+    elif bad == "encoder_key":
+        payload["encoder"]["unexpected.weight"] = torch.zeros(1)
+    else:
+        payload["flow_head"][next(iter(payload["flow_head"]))] = torch.zeros(999)
+    torch.save(payload, path)
+    with pytest.raises((ValueError, RuntimeError)):
+        checkpoint.load_hybrid_model_checkpoint(path, encoder, head, expected_metadata=expected)
+    if bad in ("metadata", "version", "missing_schema"):
+        equal(model.module.state_dict(), before)
