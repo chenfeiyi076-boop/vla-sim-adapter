@@ -53,6 +53,7 @@ def make_dataset_from_rlds(
     action_normalization_mask: Optional[List[bool]] = None,
     num_parallel_reads: int = tf.data.AUTOTUNE,
     num_parallel_calls: int = tf.data.AUTOTUNE,
+    normalize_action_proprio: bool = True,
 ) -> Tuple[dl.DLataset, dict]:
     """
     This function is responsible for loading a specific RLDS dataset from storage and getting it into a standardized
@@ -112,6 +113,8 @@ def make_dataset_from_rlds(
             it's always exactly 0 or 1. By default, all action dimensions are normalized.
         num_parallel_reads (int): number of parallel read workers. Default to AUTOTUNE.
         num_parallel_calls (int): number of parallel calls for traj_map operations. Default to AUTOTUNE.
+        normalize_action_proprio (bool): Apply the existing normalization (default True). If False,
+            return canonical standardized values while still loading/computing their statistics.
     Returns:
         Dataset of trajectories where each step has the following fields:
         - observation:
@@ -236,14 +239,15 @@ def make_dataset_from_rlds(
     dataset = dl.DLataset.from_rlds(builder, split=split, shuffle=shuffle, num_parallel_reads=num_parallel_reads)
 
     dataset = dataset.traj_map(restructure, num_parallel_calls)
-    dataset = dataset.traj_map(
-        partial(
-            normalize_action_and_proprio,
-            metadata=dataset_statistics,
-            normalization_type=action_proprio_normalization_type,
-        ),
-        num_parallel_calls,
-    )
+    if normalize_action_proprio:
+        dataset = dataset.traj_map(
+            partial(
+                normalize_action_and_proprio,
+                metadata=dataset_statistics,
+                normalization_type=action_proprio_normalization_type,
+            ),
+            num_parallel_calls,
+        )
 
     return dataset, dataset_statistics
 
