@@ -87,6 +87,8 @@ def bridge():
               NUM_ACTIONS_CHUNK=8, ACTION_PROPRIO_NORMALIZATION_TYPE="bounds_q99",
               get_oxe_dataset_kwargs_and_weights=oxe, make_interleaved_dataset=interleave)
     definitions("prismatic/vla/datasets/datasets.py", {"RLDSDataset"}, ns)
+    definitions(RLDS, {"_resolve_rlds_split"}, ns)
+    ns["get_worker_info"] = torch.utils.data.get_worker_info
     definitions(HYBRID, {"HybridRLDSDataset", "HybridRLDSBatchTransform", "PaddedCollatorForHybridFlow",
                          "HYBRID_ACTION_HORIZON", "HYBRID_ACTION_DIM", "HYBRID_PROPRIO_DIM"}, ns)
     ns["captured"] = captured
@@ -193,7 +195,7 @@ def test_raw_switch_preserves_standardization_restructure_and_statistics(normali
     ns = dict(tf=fake_tf(), tfds=SimpleNamespace(builder=lambda *a, **k: SimpleNamespace(info="info", data_dir="unused")),
               dl=SimpleNamespace(DLataset=Dataset), np=np, inspect=inspect, tree_map=tree_map,
               partial=partial, get_dataset_statistics=statistics, normalize_action_and_proprio=old_normalize)
-    make = definitions(RLDS, {"make_dataset_from_rlds"}, ns)["make_dataset_from_rlds"]
+    make = definitions(RLDS, {"_resolve_rlds_split", "make_dataset_from_rlds"}, ns)["make_dataset_from_rlds"]
     assert inspect.signature(make).parameters["normalize_action_proprio"].default is True
     kwargs = {} if normalize is None else {"normalize_action_proprio": normalize}
     ds, metadata = make("libero_spatial_no_noops", "unused", train=True, standardize_fn=standardize,

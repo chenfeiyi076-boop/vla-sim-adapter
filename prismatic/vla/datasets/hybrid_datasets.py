@@ -13,9 +13,11 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import get_worker_info
 
 from prismatic.models.backbones.llm.prompting import QwenPromptBuilder
 from prismatic.vla.datasets.datasets import RLDSDataset
+from prismatic.vla.datasets.rlds.dataset import _resolve_rlds_split
 
 
 HYBRID_ACTION_HORIZON = 10
@@ -30,10 +32,29 @@ class HybridRLDSDataset(RLDSDataset):
     and the original OXE standardization. Override only the construction hook,
     before either pass through make_dataset_from_rlds in the interleaver.
     Inherited dataset_statistics and dataset_name retain their original meaning.
+    dataset_length remains the GLOBAL effective-length estimate, not a rank-local
+    cardinality. Rank sharding is explicit; worker-level sharding is unsupported.
     """
+
+    def __init__(self, data_root_dir, data_mix, batch_transform, resize_resolution,
+                 shuffle_buffer_size=256_000, train=True, image_aug=False, *, rank=0, world_size=1):
+        if rank is None or world_size is None:
+            raise ValueError("Hybrid rank and world_size must be explicit integers (defaults 0 and 1)")
+        self.resolved_source_split = _resolve_rlds_split(
+            train=train, shard_rank=rank, shard_world_size=world_size
+        )
+        self.rank, self.world_size = rank, world_size
+        super().__init__(data_root_dir, data_mix, batch_transform, resize_resolution,
+                         shuffle_buffer_size=shuffle_buffer_size, train=train, image_aug=image_aug)
+
+    def __iter__(self):
+        if get_worker_info() is not None:
+            raise RuntimeError("Hybrid RLDS worker-level sharding is not implemented; num_workers=0 is required")
+        return super().__iter__()
 
     def make_dataset(self, rlds_config):
         config = deepcopy(rlds_config)
+        config.update(shard_rank=self.rank, shard_world_size=self.world_size)
         config["traj_transform_kwargs"].update(
             window_size=1, future_action_window_size=HYBRID_ACTION_HORIZON - 1
         )

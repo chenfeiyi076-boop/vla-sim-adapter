@@ -36,6 +36,24 @@ tf.config.set_visible_devices([], "GPU")
 
 
 # ruff: noqa: B006
+def _resolve_rlds_split(*, train: bool, shard_rank: Optional[int] = None,
+                        shard_world_size: Optional[int] = None):
+    """Resolve disjoint episode sources before any rank-local stream transforms."""
+    base_split = "train" if train else "val"
+    if shard_rank is None and shard_world_size is None:
+        return base_split
+    if shard_rank is None or shard_world_size is None:
+        raise ValueError("shard_rank and shard_world_size must be supplied together")
+    if (isinstance(shard_rank, bool) or not isinstance(shard_rank, int)
+            or isinstance(shard_world_size, bool) or not isinstance(shard_world_size, int)):
+        raise ValueError("shard_rank and shard_world_size must be integers")
+    if shard_world_size < 1 or not 0 <= shard_rank < shard_world_size:
+        raise ValueError("Require shard_world_size >= 1 and 0 <= shard_rank < shard_world_size")
+    if shard_world_size == 1:
+        return base_split
+    return tfds.even_splits(base_split, n=shard_world_size, drop_remainder=False)[shard_rank]
+
+
 def make_dataset_from_rlds(
     name: str,
     data_dir: str,
@@ -54,6 +72,8 @@ def make_dataset_from_rlds(
     num_parallel_reads: int = tf.data.AUTOTUNE,
     num_parallel_calls: int = tf.data.AUTOTUNE,
     normalize_action_proprio: bool = True,
+    shard_rank: Optional[int] = None,
+    shard_world_size: Optional[int] = None,
 ) -> Tuple[dl.DLataset, dict]:
     """
     This function is responsible for loading a specific RLDS dataset from storage and getting it into a standardized
@@ -115,6 +135,8 @@ def make_dataset_from_rlds(
         num_parallel_calls (int): number of parallel calls for traj_map operations. Default to AUTOTUNE.
         normalize_action_proprio (bool): Apply the existing normalization (default True). If False,
             return canonical standardized values while still loading/computing their statistics.
+        shard_rank, shard_world_size: Optional paired episode-source split selection. Statistics
+            always use the original unsharded "all" split; only iteration is rank-local.
     Returns:
         Dataset of trajectories where each step has the following fields:
         - observation:
@@ -127,6 +149,7 @@ def make_dataset_from_rlds(
         - action                        # action vector
         - dataset_name                  # name of the dataset
     """
+    split = _resolve_rlds_split(train=train, shard_rank=shard_rank, shard_world_size=shard_world_size)
     REQUIRED_KEYS = {"observation", "action"}
     if language_key is not None:
         REQUIRED_KEYS.add(language_key)
@@ -234,8 +257,6 @@ def make_dataset_from_rlds(
         dataset_statistics["action"]["mask"] = np.array(action_normalization_mask)
 
     # construct the dataset
-    split = "train" if train else "val"
-
     dataset = dl.DLataset.from_rlds(builder, split=split, shuffle=shuffle, num_parallel_reads=num_parallel_reads)
 
     dataset = dataset.traj_map(restructure, num_parallel_calls)
@@ -467,6 +488,8 @@ def make_interleaved_dataset(
     balance_weights: bool = False,
     traj_transform_threads: Optional[int] = None,
     traj_read_threads: Optional[int] = None,
+    shard_rank: Optional[int] = None,
+    shard_world_size: Optional[int] = None,
 ) -> dl.DLataset:
     """
     Creates an interleaved dataset from list of dataset configs (kwargs). Returns a dataset of batched frames.
@@ -490,7 +513,11 @@ def make_interleaved_dataset(
             datasets according to their sampling weights. If None, defaults to AUTOTUNE for every dataset.
         traj_read_threads: total number of parallel read workers for trajectory transforms, distributed across
             datasets according to their sampling weights. If None, defaults to AUTOTUNE for every dataset.
+        shard_rank, shard_world_size: Paired source-sharding options for actual iteration only.
+            The statistics pass is global. Returned dataset_length remains the GLOBAL effective-length
+            estimate, not an exact rank-shard transition count or rank-local epoch length.
     """
+    _resolve_rlds_split(train=train, shard_rank=shard_rank, shard_world_size=shard_world_size)
     # Default to uniform sampling (if `sample_weights` is not specified)
     if not sample_weights:
         sample_weights = [1.0] * len(dataset_kwargs_list)
@@ -506,6 +533,9 @@ def make_interleaved_dataset(
     dataset_sizes, all_dataset_statistics = [], {}
     for dataset_kwargs in dataset_kwargs_list:
         data_kwargs = copy.deepcopy(dataset_kwargs)
+        # Reject misplaced options rather than silently overriding a requested shard.
+        if "shard_rank" in data_kwargs or "shard_world_size" in data_kwargs:
+            raise ValueError("Pass source-sharding arguments to make_interleaved_dataset, not dataset_kwargs_list")
         if "dataset_frame_transform_kwargs" in data_kwargs:
             data_kwargs.pop("dataset_frame_transform_kwargs")
         _, dataset_statistics = make_dataset_from_rlds(**data_kwargs, train=train)
@@ -548,6 +578,8 @@ def make_interleaved_dataset(
         dataset, _ = make_dataset_from_rlds(
             **dataset_kwargs,
             train=train,
+            shard_rank=shard_rank,
+            shard_world_size=shard_world_size,
             num_parallel_calls=threads,
             num_parallel_reads=reads,
             dataset_statistics=all_dataset_statistics[dataset_kwargs["name"]],
