@@ -10,7 +10,7 @@ import torch
 def load_trained_policy(args, *, center_crop=True):
     from experiments.robot.libero.run_hybrid_episode import load_policy
     from prismatic.training.hybrid_checkpoint import load_hybrid_model_checkpoint
-    from prismatic.training.hybrid_formal import normalization_metadata
+    from prismatic.training.hybrid_formal import normalization_metadata, validate_normalization_metadata
 
     with args.statistics.open(encoding="utf-8") as stream:
         statistics = json.load(stream)
@@ -19,7 +19,10 @@ def load_trained_policy(args, *, center_crop=True):
     policy = load_policy(args.vlm_path, args.hf_config, args.statistics, args.device, args.num_steps, center_crop)
     info = load_hybrid_model_checkpoint(args.checkpoint, policy.encoder, policy.flow_head,
         expected_metadata=dict(experiment="hybrid_spatial_formal_v1", dataset_key="libero_spatial_no_noops",
-            action_horizon=10, action_dim=7, proprio_dim=8, normalization_statistics=normalization))
+            action_horizon=10, action_dim=7, proprio_dim=8))
+    if "normalization_statistics" not in info["metadata"]:
+        raise ValueError("Checkpoint metadata missing normalization_statistics")
+    validate_normalization_metadata(info["metadata"]["normalization_statistics"], normalization)
     if args.expected_step is not None and info["global_step"] != args.expected_step:
         raise ValueError(f"Checkpoint global_step {info['global_step']} != expected {args.expected_step}")
     policy.encoder.eval()

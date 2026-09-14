@@ -52,6 +52,33 @@ def normalization_metadata(statistics):
     return result
 
 
+def validate_normalization_metadata(expected, actual, *, atol=1e-5, rtol=1e-5):
+    """Evaluation-only numeric compatibility; training resume still uses exact metadata."""
+    vectors = []
+    for label, metadata in (("expected", expected), ("actual", actual)):
+        if not isinstance(metadata, dict) or set(metadata) != {"action", "proprio"}:
+            raise ValueError(f"{label} normalization metadata requires exactly action and proprio")
+        converted = {}
+        for kind, dim in (("action", 7), ("proprio", 8)):
+            fields = metadata[kind]
+            if not isinstance(fields, dict) or set(fields) != {"mean", "std"}:
+                raise ValueError(f"{label} {kind} requires exactly mean and std")
+            for field in ("mean", "std"):
+                try:
+                    tensor = torch.as_tensor(fields[field], dtype=torch.float32, device="cpu").detach()
+                except (TypeError, ValueError, RuntimeError) as error:
+                    raise ValueError(f"Invalid {label} {kind}.{field}") from error
+                if tensor.shape != (dim,) or not torch.isfinite(tensor).all():
+                    raise ValueError(f"Invalid {label} {kind}.{field}: expected finite [{dim}]")
+                converted[kind, field] = tensor
+        vectors.append(converted)
+    for (kind, field), expected_tensor in vectors[0].items():
+        actual_tensor = vectors[1][kind, field]
+        if not torch.allclose(expected_tensor, actual_tensor, atol=atol, rtol=rtol):
+            difference = (expected_tensor - actual_tensor).abs().max().item()
+            raise ValueError(f"Normalization metadata mismatch: {kind}.{field}, max_abs_diff={difference}")
+
+
 def build_formal_metadata(*, source_splits, statistics, max_steps, world_size=4, local_batch_size=1,
                           base_learning_rate=1e-6, lr_decay_step=30000, lr_decay_factor=.1,
                           image_aug=True, shuffle_buffer_size=10000, save_every=10000, log_every=20, seed=7):

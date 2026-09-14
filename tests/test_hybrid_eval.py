@@ -69,28 +69,40 @@ def test_runtime_errors_propagate_and_environment_closes(libero):
     assert libero.environments[0].closed
 
 
-@pytest.mark.parametrize("mismatch", [None, "normalization", "step"])
-def test_trained_loading_validation_before_rollout(tmp_path, monkeypatch, mismatch):
+@pytest.mark.parametrize("mismatch", [None, "tiny", "normalization", "step", "structure", "missing_normalization"])
+def test_trained_loading_validation_before_rollout(tmp_path, monkeypatch, libero, mismatch):
     stats = {kind: {"mean": [0.] * dim, "std": [1.] * dim} for kind, dim in (("action", 7), ("proprio", 8))}
     stats_path = tmp_path / "stats.json"
     stats_path.write_text(json.dumps({"libero_spatial_no_noops": stats}))
     normalized = formal.normalization_metadata(stats)
     if mismatch == "normalization":
-        normalized["action"]["mean"][0] = .1
+        normalized["action"]["mean"][0] = 1e-3
+    elif mismatch == "tiny":
+        normalized["proprio"]["mean"][0] = 7e-6
     policy = SimpleNamespace(encoder=torch.nn.Linear(2, 2), flow_head=torch.nn.Linear(2, 2))
     payload = dict(format_version=1, global_step=100, encoder=policy.encoder.state_dict(), flow_head=policy.flow_head.state_dict(),
         metadata=dict(experiment="hybrid_spatial_formal_v1", dataset_key="libero_spatial_no_noops",
                       action_horizon=10, action_dim=7, proprio_dim=8, normalization_statistics=normalized))
+    if mismatch == "structure":
+        payload["metadata"]["action_horizon"] = 8
+    elif mismatch == "missing_normalization":
+        del payload["metadata"]["normalization_statistics"]
     path = tmp_path / "trained.pt"
     torch.save(payload, path)
-    monkeypatch.setitem(sys.modules, "experiments.robot.libero.run_hybrid_episode", SimpleNamespace(load_policy=lambda *args: policy))
+    libero.episode_api.load_policy = lambda *args: policy
     monkeypatch.setitem(sys.modules, "prismatic.training.hybrid_checkpoint", checkpoint)
     monkeypatch.setitem(sys.modules, "prismatic.training.hybrid_formal", formal)
     args = SimpleNamespace(statistics=stats_path, checkpoint=path, expected_step=99 if mismatch == "step" else 100,
                            vlm_path="native", hf_config="config", device="cpu", num_steps=10)
-    if mismatch:
+    if mismatch not in (None, "tiny"):
         with pytest.raises(ValueError):
             evaluation.load_trained_policy(args)
+        monkeypatch.setattr(sys, "argv", ["eval", "--checkpoint", str(path), "--vlm-path", "native",
+            "--hf-config", "config", "--statistics", str(stats_path), "--device", "cpu",
+            "--expected-step", str(args.expected_step), "--trials-per-task", "1"])
+        with pytest.raises(ValueError):
+            evaluation.main()
+        assert not libero.calls and not libero.environments
     else:
         loaded, info = evaluation.load_trained_policy(args)
         assert loaded is policy and info["global_step"] == 100

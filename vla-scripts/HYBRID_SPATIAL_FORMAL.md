@@ -100,8 +100,11 @@ Only trusted local project checkpoints should be loaded. The evaluation-only
 loader strictly restores full trained encoder/head weights without constructing
 or restoring an optimizer. It checks format, step and expected formal metadata.
 The supplied statistics JSON must contain libero_spatial_no_noops; action and
-proprio mean/std are independently converted to float32 lists and must exactly
-match checkpoint normalization_statistics. No fallback or normalization hack.
+proprio mean/std are independently canonicalized to float32 and must be numerically
+compatible with checkpoint normalization_statistics: evaluation uses torch.allclose
+with atol=1e-5 and rtol=1e-5. This only tolerates insignificant floating-point
+aggregation/serialization differences; it is not a fallback statistics mechanism.
+Training resume metadata compatibility remains exact.
 
 Omit task-id for all Spatial tasks, or specify one task. Exactly 50 official
 initial states/task are used by default; requesting more than available fails.

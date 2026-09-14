@@ -1,6 +1,7 @@
 """CPU tests for the formal recipe, orchestration and artifact contracts."""
 
 import ast
+import copy
 import json
 import sys
 from types import SimpleNamespace
@@ -13,6 +14,48 @@ from test_hybrid_step import ROOT, standalone
 
 formal = standalone("prismatic/training/hybrid_formal.py")
 trainer = standalone("vla-scripts/train_hybrid_spatial.py")
+
+
+def test_normalization_numeric_compatibility():
+    expected = formal.normalization_metadata(statistics())
+    actual = copy.deepcopy(expected)
+    for kind, field, delta in (("action", "mean", 4.8e-7), ("action", "std", 2.4e-6),
+                               ("proprio", "mean", 7.2e-6), ("proprio", "std", 2.7e-7)):
+        actual[kind][field][0] += delta
+    formal.validate_normalization_metadata(expected, expected)
+    formal.validate_normalization_metadata(expected, actual, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("kind,field", [("action", "mean"), ("action", "std"), ("proprio", "mean"), ("proprio", "std")])
+def test_normalization_material_mismatch(kind, field):
+    expected = formal.normalization_metadata(statistics())
+    actual = copy.deepcopy(expected)
+    actual[kind][field][0] += 1e-3
+    with pytest.raises(ValueError, match=rf"{kind}\.{field}, max_abs_diff="):
+        formal.validate_normalization_metadata(expected, actual)
+
+
+@pytest.mark.parametrize("side", ["expected", "actual"])
+@pytest.mark.parametrize("error", ["missing_kind", "extra_kind", "missing_field", "extra_field", "dimension", "nan", "inf", "malformed"])
+def test_normalization_invalid_metadata(side, error):
+    pair = {name: formal.normalization_metadata(statistics()) for name in ("expected", "actual")}
+    bad = pair[side]
+    if error == "missing_kind":
+        del bad["action"]
+    elif error == "extra_kind":
+        bad["extra"] = {}
+    elif error == "missing_field":
+        del bad["proprio"]["mean"]
+    elif error == "extra_field":
+        bad["action"]["mask"] = [True] * 7
+    elif error == "dimension":
+        bad["proprio"]["mean"] = [0.] * 7
+    elif error in ("nan", "inf"):
+        bad["action"]["std"][0] = float(error)
+    else:
+        bad["action"] = None
+    with pytest.raises(ValueError):
+        formal.validate_normalization_metadata(**pair)
 
 
 def statistics():
