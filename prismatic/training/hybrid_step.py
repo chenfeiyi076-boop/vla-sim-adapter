@@ -22,12 +22,33 @@ import torch
 from prismatic.models.flow_action_head import compute_flow_matching_loss, sample_flow_matching_inputs
 
 
+def _hybrid_vision_parameters(vision_backbone):
+    """Exclude only the structural tail outside Prismatic's intermediate output.
+
+    Each TIMM featurizer returns second-to-last-block features, without its
+    final norm or attention pooling. Other modules stay eligible; synthetic
+    backbones without these featurizers retain all their parameters.
+    """
+    excluded = set()
+    for name in ("featurizer", "fused_featurizer"):
+        featurizer = getattr(vision_backbone, name, None)
+        if featurizer is None:
+            continue
+        blocks = getattr(featurizer, "blocks", None)
+        if blocks is None or len(blocks) == 0:
+            raise ValueError(f"{name} must have transformer blocks for intermediate-layer parameter selection")
+        tail = (blocks[-1], getattr(featurizer, "norm", None), getattr(featurizer, "attn_pool", None))
+        excluded.update(id(p) for module in tail if module is not None for p in module.parameters())
+    return [p for p in vision_backbone.parameters() if id(p) not in excluded]
+
+
 def _hybrid_parameters(encoder, flow_head):
     # Select by parameter identity so tied Qwen input/output embeddings remain
     # trainable exactly once, while an untied, unused vocabulary head is excluded.
-    used = {id(p) for module in (encoder.vision_backbone, encoder.projector,
+    used = {id(p) for p in _hybrid_vision_parameters(encoder.vision_backbone)}
+    used.update(id(p) for module in (encoder.projector,
                                 encoder.get_input_embeddings(), encoder.get_decoder())
-            for p in module.parameters()}
+                for p in module.parameters())
     encoder_params = [p for p in encoder.parameters() if id(p) in used]
     flow_params = list(flow_head.parameters())
     if not encoder_params or not flow_params:

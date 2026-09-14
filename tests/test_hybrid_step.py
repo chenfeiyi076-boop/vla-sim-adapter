@@ -197,6 +197,70 @@ def test_tied_embeddings_included_once(training, inputs):
     assert encoder.get_input_embeddings().weight.requires_grad
 
 
+@pytest.mark.parametrize("depths", [(2, 3), (5, 4), (3, None)])
+def test_structural_timm_tail_exclusions(training, inputs, depths):
+    encoder, head, *_ = inputs
+
+    def featurizer(depth, pool=False):
+        model = nn.Module()
+        model.blocks = nn.ModuleList([nn.Linear(6, 6) for _ in range(depth)])
+        model.norm = nn.LayerNorm(6)
+        model.patch_embed = nn.Linear(4, 6)
+        # An unfamiliar module must not be filtered by speculative name rules.
+        model.future_module = nn.Linear(6, 6)
+        if pool:
+            model.attn_pool = nn.Linear(6, 6)
+        return model
+
+    vision = nn.Module()
+    vision.featurizer = featurizer(depths[0])
+    if depths[1] is not None:
+        vision.fused_featurizer = featurizer(depths[1], pool=True)
+    encoder.vision_backbone = vision
+    encoder.language_model.lm_head.weight = encoder.get_input_embeddings().weight
+    tail = []
+    earlier = []
+    for model in vision.children():
+        tail.extend(model.blocks[-1].parameters())
+        tail.extend(model.norm.parameters())
+        if hasattr(model, "attn_pool"):
+            tail.extend(model.attn_pool.parameters())
+        earlier.extend(model.blocks[:-1].parameters())
+        earlier.extend(model.patch_embed.parameters())
+        earlier.extend(model.future_module.parameters())
+    for p in tail:
+        p.grad = torch.ones_like(p)
+    groups = training.hybrid_parameter_groups(encoder, head)
+    ids = [id(p) for group in groups for p in group["params"]]
+    assert len(ids) == len(set(ids))
+    assert {id(p) for p in training._hybrid_vision_parameters(vision)} == {id(p) for p in earlier}
+    for p in tail:
+        assert id(p) not in ids and not p.requires_grad and p.grad is None
+    for module in (encoder.projector, encoder.get_input_embeddings(), encoder.get_decoder(), head):
+        earlier.extend(module.parameters())
+    assert all(p.requires_grad and id(p) in ids for p in earlier)
+    for module in (encoder.action_queries, encoder.proprio_projector, encoder.action_head):
+        assert all(not p.requires_grad and id(p) not in ids for p in module.parameters())
+
+
+def test_structural_timm_optional_norm_and_pool(training):
+    vision = nn.Module()
+    vision.featurizer = nn.Module()
+    vision.featurizer.blocks = nn.ModuleList([nn.Linear(3, 3) for _ in range(4)])
+    assert {id(p) for p in training._hybrid_vision_parameters(vision)} == {
+        id(p) for p in vision.featurizer.blocks[:-1].parameters()}
+
+
+def test_sequential_vision_keeps_all_parameters(training, inputs):
+    encoder, head, *_ = inputs
+    expected = {id(p) for p in encoder.vision_backbone.parameters()}
+    assert {id(p) for p in training._hybrid_vision_parameters(encoder.vision_backbone)} == expected
+    groups = training.hybrid_parameter_groups(encoder, head)
+    selected = {id(p) for group in groups for p in group["params"]}
+    assert expected <= selected
+    assert all(p.requires_grad for p in encoder.vision_backbone.parameters())
+
+
 @pytest.mark.parametrize("bad", ["horizon", "action_dim", "proprio_dim", "head_horizon", "nan"])
 def test_dimensions_and_finite_validation(training, inputs, bad):
     encoder, head, batch, normalizer, _ = inputs
