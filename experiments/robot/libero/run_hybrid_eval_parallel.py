@@ -36,22 +36,22 @@ def wait_workers(processes):
                 p.wait()
 
 
-def worker_environment(threads, egl_device):
+def worker_environment(threads, physical_gpu):
     env = os.environ.copy()
     for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE", "GROUP_RANK", "ROLE_RANK"):
         env.pop(key, None)
     env.update(OMP_NUM_THREADS=str(threads), MKL_NUM_THREADS=str(threads),
-               MUJOCO_GL="egl", PYOPENGL_PLATFORM="egl", MUJOCO_EGL_DEVICE_ID=str(egl_device))
-    # CUDA_VISIBLE_DEVICES is deliberately preserved: --devices uses its logical indices.
+               CUDA_VISIBLE_DEVICES=str(physical_gpu),
+               MUJOCO_GL="egl", PYOPENGL_PLATFORM="egl", MUJOCO_EGL_DEVICE_ID="0")
     return env
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--num-workers", type=int, choices=(1, 4), default=4)
-    parser.add_argument("--devices", type=int, nargs="+")
-    parser.add_argument("--egl-devices", type=int, nargs="+", required=True,
-                        help="Explicit EGL enumeration indices; verify server mapping before use")
+    parser.add_argument("--devices", type=int, nargs="+", help="Physical GPU IDs, one per worker")
+    parser.add_argument("--egl-devices", type=int, nargs="+",
+                        help="Deprecated and ignored; isolated workers always use EGL device 0")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -61,8 +61,8 @@ def main(argv=None):
     args, forwarded = parser.parse_known_args(argv)
     devices = args.devices if args.devices is not None else list(range(args.num_workers))
     if (len(devices) != args.num_workers or len(set(devices)) != len(devices)
-            or len(args.egl_devices) != args.num_workers or min(devices + args.egl_devices) < 0 or args.threads < 1):
-        parser.error("Need distinct logical CUDA devices, one explicit EGL index per worker, and positive threads")
+            or min(devices) < 0 or args.threads < 1):
+        parser.error("Need distinct physical GPU IDs and positive threads")
     if any(s.split("=")[0] in ("--device", "--partial", "--output", "--reference") for s in forwarded):
         parser.error("Device/output/partial are controlled by launcher; reference mode is serial-only")
     paths = [args.run_dir / f"worker-{i}.partial.json" for i in range(args.num_workers)]
@@ -76,12 +76,13 @@ def main(argv=None):
         tf.config.threading.set_inter_op_parallelism_threads(1)
         import torch
         torch.set_num_threads(args.threads)
-        torch.cuda.set_device(devices[args.worker_id])
-        print(f"worker={args.worker_id} CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
-              f"torch=cuda:{devices[args.worker_id]} EGL={os.environ.get('MUJOCO_EGL_DEVICE_ID')} TF_GPU=[]",
+        torch.cuda.set_device(0)
+        print(f"worker={args.worker_id} physical_gpu={devices[args.worker_id]} "
+              f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
+              f"torch_device=cuda:0 EGL={os.environ.get('MUJOCO_EGL_DEVICE_ID')} TF_GPU=[]",
               file=sys.stderr, flush=True)
         from experiments.robot.libero.run_hybrid_eval import main as serial_main
-        serial_main(["--checkpoint", str(args.checkpoint), "--device", f"cuda:{devices[args.worker_id]}",
+        serial_main(["--checkpoint", str(args.checkpoint), "--device", "cuda:0",
                      "--partial", str(paths[args.worker_id]), *( ["--resume"] if args.resume else []), *forwarded],
                     worker_id=args.worker_id, num_workers=args.num_workers)
         return
@@ -107,10 +108,10 @@ def main(argv=None):
         for index in range(args.num_workers):
             command = [sys.executable, "-m", "experiments.robot.libero.run_hybrid_eval_parallel",
                 "--worker-id", str(index), "--num-workers", str(args.num_workers),
-                "--devices", *map(str, devices), "--egl-devices", *map(str, args.egl_devices),
+                "--devices", *map(str, devices),
                 "--threads", str(args.threads), "--run-dir", str(args.run_dir), "--output", str(args.output),
                 "--checkpoint", str(args.checkpoint), *(["--resume"] if args.resume else []), *forwarded]
-            processes.append(subprocess.Popen(command, env=worker_environment(args.threads, args.egl_devices[index])))
+            processes.append(subprocess.Popen(command, env=worker_environment(args.threads, devices[index])))
         wait_workers(processes)
         from experiments.robot.libero.hybrid_eval_results import atomic_json, merge_partials
         result = merge_partials(paths, checkpoint=args.checkpoint)

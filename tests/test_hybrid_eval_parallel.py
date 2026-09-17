@@ -170,13 +170,45 @@ def test_lazy_vs_old_eager_rollout_and_episode_noise(monkeypatch):
     assert all(torch.equal(a, b) for a, b in zip(outcomes[0][2], outcomes[1][2]))
 
 
-def test_worker_environment_isolation(monkeypatch):
+@pytest.mark.parametrize("physical_gpu", range(4))
+def test_worker_environment_isolation(monkeypatch, physical_gpu):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3,5,6,7")
     monkeypatch.setenv("WORLD_SIZE", "4")
-    env = parallel.worker_environment(2, 5)
-    assert env["CUDA_VISIBLE_DEVICES"] == "3,5,6,7"
-    assert env["MUJOCO_EGL_DEVICE_ID"] == "5" and env["OMP_NUM_THREADS"] == "2"
+    env = parallel.worker_environment(2, physical_gpu)
+    assert env["CUDA_VISIBLE_DEVICES"] == str(physical_gpu)
+    assert env["MUJOCO_EGL_DEVICE_ID"] == "0"
+    assert env["MUJOCO_GL"] == env["PYOPENGL_PLATFORM"] == "egl"
+    assert env["OMP_NUM_THREADS"] == env["MKL_NUM_THREADS"] == "2"
     assert "WORLD_SIZE" not in env
+
+
+@pytest.mark.parametrize("physical_gpu", range(4))
+def test_worker_uses_local_cuda_zero(tmp_path, monkeypatch, capsys, physical_gpu):
+    calls = {}
+    def capture(name):
+        return lambda *args: calls.__setitem__(name, args)
+    monkeypatch.setitem(sys.modules, "tensorflow", SimpleNamespace(config=SimpleNamespace(
+        set_visible_devices=capture("tf_visible"), threading=SimpleNamespace(
+            set_intra_op_parallelism_threads=capture("tf_intra"),
+            set_inter_op_parallelism_threads=capture("tf_inter")))))
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        set_num_threads=capture("torch_threads"), cuda=SimpleNamespace(set_device=capture("cuda"))))
+    def serial_main(argv, **kwargs):
+        calls["device"] = argv[argv.index("--device") + 1]
+    monkeypatch.setitem(sys.modules, "experiments.robot.libero.run_hybrid_eval", SimpleNamespace(main=serial_main))
+    monkeypatch.setattr(parallel.signal, "signal", lambda *args: None)
+    for key, value in parallel.worker_environment(2, physical_gpu).items():
+        monkeypatch.setenv(key, value)
+    parallel.main(["--worker-id", str(physical_gpu), "--devices", "0", "1", "2", "3",
+                   "--threads", "2", "--checkpoint", str(tmp_path / "model.pt"),
+                   "--run-dir", str(tmp_path / "run"), "--output", str(tmp_path / "out.json")])
+    assert calls["cuda"] == (0,)
+    assert calls["device"] == "cuda:0"
+    assert calls["tf_visible"] == ([], "GPU")
+    diagnostic = capsys.readouterr().err
+    for field in (f"physical_gpu={physical_gpu}", f"CUDA_VISIBLE_DEVICES={physical_gpu}",
+                  "torch_device=cuda:0", "EGL=0", "TF_GPU=[]"):
+        assert field in diagnostic
 
 
 def test_worker_crash_terminates_peer():
@@ -204,6 +236,8 @@ def test_parent_launches_fresh_cpu_processes_and_merges(tmp_path, monkeypatch, w
     spawned = []
     def fake_worker_command(command, **kwargs):
         worker = int(command[command.index("--worker-id") + 1])
+        assert kwargs["env"]["CUDA_VISIBLE_DEVICES"] == str(worker)
+        assert kwargs["env"]["MUJOCO_EGL_DEVICE_ID"] == "0"
         run_dir = command[command.index("--run-dir") + 1]
         program = (
             "import json,sys; from pathlib import Path; "
