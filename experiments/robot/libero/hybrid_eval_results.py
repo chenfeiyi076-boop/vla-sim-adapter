@@ -71,10 +71,22 @@ def atomic_json(path, value, *, overwrite=False):
             os.unlink(temporary)
 
 
-def assigned_ids(specs, worker_id=0, num_workers=1):
+def assigned_ids(specs, worker_id=0, num_workers=1, strategy="task_ordinal_v1"):
     if type(num_workers) is not int or num_workers < 1 or not 0 <= worker_id < num_workers:
         raise ValueError("Invalid worker assignment")
-    return {s["global_episode_id"] for s in specs if s["global_episode_id"] % num_workers == worker_id}
+    if strategy != "task_ordinal_v1":
+        raise ValueError("Incompatible worker assignment strategy")
+    owners = {task_id: ordinal % num_workers
+              for ordinal, task_id in enumerate(sorted({s["task_id"] for s in specs}))}
+    return {s["global_episode_id"] for s in specs if owners[s["task_id"]] == worker_id}
+
+
+def worker_assignment(worker_id, num_workers):
+    assignment = dict(worker_id=worker_id, num_workers=num_workers)
+    if num_workers > 1:
+        # Reject old episode-sharded journals even if their completed rows happen to overlap.
+        assignment["strategy"] = "task_ordinal_v1"
+    return assignment
 
 
 def validate_records(records, specs, allowed, *, complete=False):
@@ -117,7 +129,7 @@ class EpisodeJournal:
         self.path = Path(path) if path is not None else None
         self.manifest = manifest
         self.specs = specs
-        self.assignment = dict(worker_id=worker_id, num_workers=num_workers)
+        self.assignment = worker_assignment(worker_id, num_workers)
         self.allowed = assigned_ids(specs, worker_id, num_workers)
         self.records = []
         if self.path is not None and self.path.exists():
@@ -171,7 +183,7 @@ def merge_partials(paths, *, checkpoint):
     records = []
     for index, payload in enumerate(payloads):
         if (payload["manifest"] != first["manifest"] or payload["episodes"] != first["episodes"]
-                or payload["assignment"] != dict(worker_id=index, num_workers=len(paths))):
+                or payload["assignment"] != worker_assignment(index, len(paths))):
             raise ValueError("Worker identity mismatch")
         validate_records(payload["records"], first["episodes"],
                          assigned_ids(first["episodes"], index, len(paths)), complete=True)

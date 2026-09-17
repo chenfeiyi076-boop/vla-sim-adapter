@@ -31,13 +31,20 @@ def record(spec):
 
 
 def test_sharding_retains_original_task_ids():
-    all_specs = [dict(global_episode_id=t * 50 + i) for t in range(10) for i in range(50)]
+    all_specs = [dict(global_episode_id=t * 50 + i, task_id=t) for t in range(10) for i in range(50)]
     shards = [results.assigned_ids(all_specs, i, 4) for i in range(4)]
-    assert [len(s) for s in shards] == [125] * 4
+    assert [len(s) for s in shards] == [150, 150, 100, 100]
     assert set.union(*shards) == set(range(500))
     assert sum(map(len, shards)) == len(set.union(*shards))
+    for task in range(10):
+        episodes = set(range(task * 50, (task + 1) * 50))
+        assert [i for i, shard in enumerate(shards) if episodes & shard] == [task % 4]
+        assert episodes <= shards[task % 4]
     subset = [s for s in all_specs if 200 <= s["global_episode_id"] < 250]
     assert results.assigned_ids(subset) == set(range(200, 250))
+    subset = [s for s in reversed(all_specs) if s["task_id"] in (0, 4)]
+    assert [results.assigned_ids(subset, i, 4) for i in range(4)] == [
+        set(range(50)), set(range(200, 250)), set(), set()]
 
 
 @pytest.mark.parametrize("field", ["checkpoint", "seed", "normalization", "inference", "suite", "trials"])
@@ -96,9 +103,9 @@ def test_merge_complete_workers_and_reject_missing(tmp_path):
                 journal.append(record(spec))
     merged = results.merge_partials(paths, checkpoint=checkpoint)
     assert merged["total_trials"] == 8 and merged["overall_success_rate"] == 1
-    payload = json.loads(paths[-1].read_text())
+    payload = json.loads(paths[0].read_text())
     payload["records"].pop()
-    paths[-1].write_text(json.dumps(payload))
+    paths[0].write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="Missing"):
         results.merge_partials(paths, checkpoint=checkpoint)
 
@@ -120,13 +127,61 @@ def test_serial_resume_and_worker_partition(libero, tmp_path):
         paths.append(part)
         output = evaluation.evaluate_tasks(libero.cfg, libero.suite, None,
             partial=part, worker_id=worker, num_workers=4, **kwargs)
-        assert output["total_trials"] == 2
+        assert output["total_trials"] == (4 if worker < 2 else 0)
     # Comparator validates complete union and identical per-episode protocol outcomes.
     comparison = compare([path], paths)
     assert comparison["protocol_results_equal"]
     single = tmp_path / "worker-single.json"
     assert evaluation.evaluate_tasks(libero.cfg, libero.suite, None, partial=single, **kwargs) == resumed
     assert compare([path], [single])["protocol_results_equal"]
+
+
+@pytest.mark.parametrize("mismatch", ["old_strategy", "worker", "workers"])
+def test_resume_and_merge_reject_incompatible_assignment(tmp_path, mismatch):
+    paths = [tmp_path / f"worker-{i}.json" for i in range(4)]
+    for worker, path in enumerate(paths):
+        journal = results.EpisodeJournal(path, {}, specs(), worker_id=worker, num_workers=4)
+        for spec in specs():
+            if spec["global_episode_id"] in journal.allowed:
+                journal.append(record(spec))
+        resumed = results.EpisodeJournal(path, {}, specs(), resume=True, worker_id=worker, num_workers=4)
+        assert resumed.completed == journal.allowed
+    payload = json.loads(paths[0].read_text())
+    if mismatch == "old_strategy":
+        del payload["assignment"]["strategy"]
+    elif mismatch == "worker":
+        payload["assignment"]["worker_id"] = 1
+    else:
+        payload["assignment"]["num_workers"] = 1
+    paths[0].write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="assignment"):
+        results.EpisodeJournal(paths[0], {}, specs(), resume=True, worker_id=0, num_workers=4)
+    with pytest.raises(ValueError, match="identity"):
+        results.merge_partials(paths, checkpoint=tmp_path / "unused.pt")
+
+
+def test_task_sharding_preserves_serial_env_history(libero):
+    libero.suite.n_tasks = 5
+    libero.api.load_initial_states = lambda cfg, suite, index: ([(index, i) for i in range(4)], None)
+    histories = []
+    def episode(cfg, env, description, policy, initial_state):
+        if not hasattr(env, "trials"):
+            env.trials = []
+            histories.append((description, env.trials))
+        env.trials.append(initial_state[1])
+        return dict(success=len(env.trials) % 2 == 0, policy_calls=2, action_steps=16)
+    libero.episode_api.run_single_episode = episode
+    kwargs = dict(trials_per_task=4, task_ids=[4, 0])
+    serial = evaluation.evaluate_tasks(libero.cfg, libero.suite, None, **kwargs)
+    serial_history = list(histories)
+    histories.clear()
+    libero.environments.clear()
+    outputs = [evaluation.evaluate_tasks(libero.cfg, libero.suite, None,
+        worker_id=i, num_workers=4, **kwargs) for i in range(4)]
+    assert histories == serial_history == [("task-0", [0, 1, 2, 3]), ("task-4", [0, 1, 2, 3])]
+    assert len(libero.environments) == 2 and all(env.closed for env in libero.environments)
+    assert [output["total_trials"] for output in outputs] == [4, 4, 0, 0]
+    assert [task for output in outputs for task in output["task_results"]] == serial["task_results"]
 
 
 def test_lazy_vs_old_eager_rollout_and_episode_noise(monkeypatch):
@@ -256,7 +311,7 @@ def test_parent_launches_fresh_cpu_processes_and_merges(tmp_path, monkeypatch, w
     output = tmp_path / "final.json"
     parallel.main(["--checkpoint", str(checkpoint), "--run-dir", str(tmp_path / "run"),
                    "--output", str(output), "--num-workers", str(workers),
-                   "--egl-devices", *map(str, range(workers))])
+                   "--egl-devices", *(["0"] * workers)])
     assert len({p.pid for p in spawned}) == workers
     assert all(p.returncode == 0 for p in spawned)
     assert json.loads(output.read_text())["total_trials"] == 8
