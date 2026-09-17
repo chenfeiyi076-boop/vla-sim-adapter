@@ -40,6 +40,12 @@ def compare(baseline, candidate):
         report = dict(global_episode_id=eid, differing_fields=mismatch)
         if "debug" in a[eid] and "debug" in b[eid]:
             ad, bd = a[eid]["debug"], b[eid]["debug"]
+            ao, bo = ad.get("first_observation", {}), bd.get("first_observation", {})
+            report["first_observation_hashes_equal"] = {
+                key: ao[key] == bo[key] if key in ao and key in bo else None
+                for key in ("agentview_raw_hash", "wrist_raw_hash",
+                            "agentview_processed_hash", "wrist_processed_hash")
+            }
             report["noise_hashes_equal"] = ad["noise_hashes"] == bd["noise_hashes"]
             report["action_hash_equal"] = ad["action_hash"] == bd["action_hash"]
             aa, ba = np.asarray(ad["actions"], dtype=np.float64), np.asarray(bd["actions"], dtype=np.float64)

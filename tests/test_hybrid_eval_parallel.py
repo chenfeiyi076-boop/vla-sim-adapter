@@ -184,32 +184,46 @@ def test_task_sharding_preserves_serial_env_history(libero):
     assert [task for output in outputs for task in output["task_results"]] == serial["task_results"]
 
 
-def test_lazy_vs_old_eager_rollout_and_episode_noise(monkeypatch):
+@pytest.mark.parametrize("debug", [False, True])
+def test_lazy_vs_old_eager_rollout_and_episode_noise(monkeypatch, debug):
     prepared = []
+    hashed = []
+    original_hash = results.array_hash
+    def tracked_hash(value):
+        hashed.append(np.asarray(value).copy())
+        return original_hash(value)
+    monkeypatch.setattr(results, "array_hash", tracked_hash)
+    def observation(value):
+        return {"agentview_image": np.asarray([value], dtype=float),
+                "robot0_eye_in_hand_image": np.asarray([value + 100], dtype=float)}
+    def prepare(obs, size):
+        prepared.append(obs.copy())
+        return {"full_image": obs["agentview_image"] + 10,
+                "wrist_image": obs["robot0_eye_in_hand_image"] + 20}, None
     api = SimpleNamespace(TASK_MAX_STEPS={"libero_spatial": 18},
         get_libero_dummy_action=lambda model: [0.] * 7, get_image_resize_size=lambda cfg: 224,
-        prepare_observation=lambda obs, size: (prepared.append(obs.copy()) or obs, None),
+        prepare_observation=prepare,
         process_action=lambda action, model: action.copy())
     monkeypatch.setitem(sys.modules, "experiments.robot.libero.run_libero_eval", api)
     class Env:
         def reset(self):
             self.steps = []
         def set_init_state(self, state):
-            return np.asarray([state], dtype=float)
+            return observation(state)
         def step(self, action):
             self.steps.append(action)
-            return np.asarray([len(self.steps)], dtype=float), 0, False, {}
+            return observation(len(self.steps)), 0, False, {}
     class Policy:
         profile = None
         def __init__(self, reference):
             self.reference_rng = reference
             self.generator = None if reference else torch.Generator().manual_seed(7)
             self.noises = []
-            self.debug_trace = {"actions": []}
+            self.debug_trace = {"actions": []} if debug else None
         def __call__(self, obs, description):
             noise = torch.randn(1, 10, 7, generator=self.generator)
             self.noises.append(noise.clone())
-            return noise[0].numpy() + obs[0]
+            return noise[0].numpy() + obs["full_image"][0]
     cfg = SimpleNamespace(task_suite_name="libero_spatial", model_family="openvla",
                           num_steps_wait=2, num_open_loop_steps=8)
     outcomes = []
@@ -217,9 +231,19 @@ def test_lazy_vs_old_eager_rollout_and_episode_noise(monkeypatch):
         torch.manual_seed(7)
         p, env = Policy(reference), Env()
         prepared.clear()
+        hashed.clear()
         outcome = runner.run_single_episode(cfg, env, "task", p, 0)
         assert len(prepared) == (18 if reference else 3)
         assert not torch.equal(p.noises[0], p.noises[1])
+        assert len(hashed) == (4 if debug else 0)
+        if debug:
+            # First policy call follows two settling steps, not reset or later policy calls.
+            assert p.debug_trace["first_observation"] == {
+                key: original_hash(np.asarray([value], dtype=float))
+                for key, value in (("agentview_raw_hash", 2), ("wrist_raw_hash", 102),
+                                   ("agentview_processed_hash", 12), ("wrist_processed_hash", 122))}
+        else:
+            assert p.debug_trace is None
         outcomes.append((outcome, env.steps, p.noises))
     assert outcomes[0][:2] == outcomes[1][:2]
     assert all(torch.equal(a, b) for a, b in zip(outcomes[0][2], outcomes[1][2]))
@@ -318,7 +342,8 @@ def test_parent_launches_fresh_cpu_processes_and_merges(tmp_path, monkeypatch, w
     assert not (tmp_path / "run" / "launcher.lock").exists()
 
 
-def test_debug_comparison_reports_numeric_action_difference(tmp_path):
+@pytest.mark.parametrize("observation_mode", ["equal", "different", "missing", "old"])
+def test_debug_comparison_reports_numeric_action_difference(tmp_path, observation_mode):
     paths = [tmp_path / "a.json", tmp_path / "b.json"]
     for path in paths:
         journal = results.EpisodeJournal(path, {"schema_version": 1}, specs())
@@ -328,8 +353,21 @@ def test_debug_comparison_reports_numeric_action_difference(tmp_path):
             if path == paths[1]:
                 trace[0, 0] = 1e-7
             r["debug"] = dict(actions=trace.tolist(), action_hash=results.array_hash(trace), noise_hashes=["same"])
+            if observation_mode != "old" and not (observation_mode == "missing" and path == paths[1]):
+                r["debug"]["first_observation"] = dict(
+                    agentview_raw_hash="same", wrist_raw_hash="same",
+                    agentview_processed_hash="different" if observation_mode == "different" and path == paths[1] else "same",
+                    wrist_processed_hash="same")
             journal.append(r)
     report = compare([paths[0]], [paths[1]])
     assert report["protocol_results_equal"]
     assert report["episodes"][0]["action_hash_equal"] is False
     assert report["episodes"][0]["max_absolute_action_difference"] == 1e-7
+    for episode in report["episodes"]:
+        matches = episode["first_observation_hashes_equal"]
+        assert len(matches) == 4
+        if observation_mode in ("missing", "old"):
+            assert all(value is None for value in matches.values())
+        else:
+            assert matches == dict(agentview_raw_hash=True, wrist_raw_hash=True,
+                agentview_processed_hash=observation_mode == "equal", wrist_processed_hash=True)

@@ -53,6 +53,15 @@ def run_single_episode(cfg, env, description, policy, initial_state):
         if not actions:
             if not getattr(policy, "reference_rng", False):
                 observation, _ = timed("prepare_observation", lambda: prepare_observation(obs, resize_size))
+            if policy_calls == 0 and getattr(policy, "debug_trace", None) is not None:
+                from experiments.robot.libero.hybrid_eval_results import array_hash
+                # These are the resized images passed to policy, before its crop/processor.
+                policy.debug_trace["first_observation"] = {
+                    "agentview_raw_hash": array_hash(obs["agentview_image"]),
+                    "wrist_raw_hash": array_hash(obs["robot0_eye_in_hand_image"]),
+                    "agentview_processed_hash": array_hash(observation["full_image"]),
+                    "wrist_processed_hash": array_hash(observation["wrist_image"]),
+                }
             chunk = timed("policy", lambda: policy(observation, description))
             if not isinstance(chunk, np.ndarray) or chunk.shape != (10, 7) or not np.isfinite(chunk).all():
                 raise ValueError("Hybrid policy must return finite canonical actions [10,7]")
