@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import torch
+import time
 
 
 DATASET_KEY = "libero_spatial_no_noops"
@@ -46,6 +47,17 @@ class HybridLiberoPolicy:
         self.normalizer = normalizer
         self.center_crop = center_crop
         self.num_steps = num_steps
+        self.generator = None
+        self.reference_rng = False
+        self.profile = None
+        self.debug_trace = None
+
+    def begin_episode(self, seed, *, reference=False, profile=False, debug=False):
+        self.reference_rng = reference
+        device = next(self.encoder.parameters()).device
+        self.generator = None if reference else torch.Generator(device=device).manual_seed(seed)
+        self.profile = {} if profile else None
+        self.debug_trace = {"noise_hashes": [], "actions": []} if debug else None
 
     @torch.inference_mode()
     def __call__(self, observation, task_description):
@@ -90,9 +102,21 @@ class HybridLiberoPolicy:
             raise ValueError("encoder feature_mask must be boolean with valid tokens")
         proprio = self.normalizer.normalize_proprio(proprio)
         check_tensor("normalized proprio", proprio, (1, 8))
-        normalized = sample_actions_euler(
-            self.flow_head, features.float(), proprio, feature_mask, num_steps=self.num_steps
-        )
+        sampling = dict(num_steps=self.num_steps, generator=self.generator)
+        if self.debug_trace is not None:
+            from experiments.robot.libero.hybrid_eval_results import array_hash
+            noise = torch.randn((1, 10, 7), device=proprio.device, dtype=proprio.dtype, generator=self.generator)
+            self.debug_trace["noise_hashes"].append(array_hash(noise.cpu().numpy()))
+            sampling["initial_noise"] = noise
+        if self.profile is not None:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            start = time.monotonic()
+        normalized = sample_actions_euler(self.flow_head, features.float(), proprio, feature_mask, **sampling)
+        if self.profile is not None:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            self.profile["flow_sampling"] = self.profile.get("flow_sampling", 0.) + time.monotonic() - start
         check_tensor("normalized actions", normalized, (1, 10, 7))
         canonical = self.normalizer.denormalize_action(normalized)
         check_tensor("denormalized actions", canonical, (1, 10, 7))

@@ -107,6 +107,33 @@ def test_policy_real_euler_and_normalizer(dependencies, monkeypatch):
     assert prompt.endswith("<|im_start|>assistant\n") and "<|endoftext|>" not in prompt
 
 
+def test_episode_generator_advances_and_isolates_flow_rng(dependencies, monkeypatch):
+    p = policy()
+    actual_sampler = sampling.sample_actions_euler
+    generators = []
+    def sampled(*args, **kwargs):
+        assert torch.is_inference_mode_enabled()
+        generators.append(kwargs["generator"])
+        return actual_sampler(*args, **kwargs)
+    monkeypatch.setattr(sampling, "sample_actions_euler", sampled)
+    p.begin_episode(7, debug=True)
+    first = p(observation(), "task")
+    torch.randn(1000)  # Unrelated global RNG does not alter episode sampling.
+    second = p(observation(), "task")
+    hashes = list(p.debug_trace["noise_hashes"])
+    assert hashes[0] != hashes[1] and generators[0] is generators[1]
+    p.begin_episode(7, debug=True)
+    np.testing.assert_array_equal(first, p(observation(), "task"))
+    np.testing.assert_array_equal(second, p(observation(), "task"))
+    assert p.debug_trace["noise_hashes"] == hashes
+    # Reference stream and generator stream agree on CPU for the same sequence.
+    torch.manual_seed(7)
+    p.begin_episode(7, reference=True, debug=True)
+    np.testing.assert_array_equal(first, p(observation(), "task"))
+    np.testing.assert_array_equal(second, p(observation(), "task"))
+    assert p.debug_trace["noise_hashes"] == hashes
+
+
 def test_encoder_dict_contract_does_not_depend_on_iteration_order(dependencies):
     p = policy()
     # Reversed insertion order and extra metadata must not affect named access.

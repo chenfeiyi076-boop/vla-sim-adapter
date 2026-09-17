@@ -112,6 +112,7 @@ def test_trained_loading_validation_before_rollout(tmp_path, monkeypatch, libero
 def test_result_schema_zero_success_and_atomic_output(libero, monkeypatch, tmp_path, capsys):
     libero.episode_api.run_single_episode = lambda *args: dict(success=False, policy_calls=1, action_steps=8)
     monkeypatch.setattr(evaluation, "load_trained_policy", lambda *a, **kw: (None, {"global_step": 100}))
+    monkeypatch.setattr(evaluation, "build_manifest", lambda *a: {"schema_version": 1})
     monkeypatch.setitem(sys.modules, "prismatic.training.hybrid_formal", formal)
     output = tmp_path / "result.json"
     monkeypatch.setattr(sys, "argv", ["eval", "--checkpoint", "trained.pt", "--vlm-path", "native",
@@ -121,7 +122,9 @@ def test_result_schema_zero_success_and_atomic_output(libero, monkeypatch, tmp_p
     assert result == json.loads(capsys.readouterr().out)
     assert result["total_trials"] == 4 and result["total_successes"] == result["overall_success_rate"] == 0
     assert result["num_euler_steps"] == 10 and result["num_open_loop_steps"] == 8 and result["global_step"] == 100
-    assert list(tmp_path.iterdir()) == [output]
+    partial = output.with_name(output.name + ".partial.json")
+    assert set(tmp_path.iterdir()) == {output, partial}
+    assert len(json.loads(partial.read_text())["records"]) == 4
 
 
 def test_atomic_output_failure_preserves_existing_file(tmp_path, monkeypatch):

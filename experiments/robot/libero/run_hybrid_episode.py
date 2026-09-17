@@ -10,6 +10,7 @@ from collections import deque
 from pathlib import Path
 
 import numpy as np
+import time
 
 
 def run_single_episode(cfg, env, description, policy, initial_state):
@@ -24,26 +25,44 @@ def run_single_episode(cfg, env, description, policy, initial_state):
         prepare_observation, process_action,
     )
 
+    profile = getattr(policy, "profile", None)
+    def timed(name, operation):
+        if profile is None:
+            return operation()
+        start = time.monotonic()
+        result = operation()
+        profile[name] = profile.get(name, 0.) + time.monotonic() - start
+        return result
+
+    start = time.monotonic()
     env.reset()
     obs = env.set_init_state(initial_state) if initial_state is not None else env.get_observation()
+    if profile is not None:
+        profile["reset"] = profile.get("reset", 0.) + time.monotonic() - start
     actions = deque()
     resize_size = get_image_resize_size(cfg)
     policy_calls = action_steps = 0
     success = False
     for t in range(TASK_MAX_STEPS[cfg.task_suite_name] + cfg.num_steps_wait):
         if t < cfg.num_steps_wait:
-            obs, _, _, _ = env.step(get_libero_dummy_action(cfg.model_family))
+            obs, _, _, _ = timed("env_step", lambda: env.step(get_libero_dummy_action(cfg.model_family)))
             continue
-        observation, _ = prepare_observation(obs, resize_size)
+        # Debug reference reproduces the original eager preprocessing order.
+        if getattr(policy, "reference_rng", False):
+            observation, _ = timed("prepare_observation", lambda: prepare_observation(obs, resize_size))
         if not actions:
-            chunk = policy(observation, description)
+            if not getattr(policy, "reference_rng", False):
+                observation, _ = timed("prepare_observation", lambda: prepare_observation(obs, resize_size))
+            chunk = timed("policy", lambda: policy(observation, description))
             if not isinstance(chunk, np.ndarray) or chunk.shape != (10, 7) or not np.isfinite(chunk).all():
                 raise ValueError("Hybrid policy must return finite canonical actions [10,7]")
             # Preserve evaluator's execution window (default 8), independently of H=10.
             actions.extend(chunk[:cfg.num_open_loop_steps])
             policy_calls += 1
         action = process_action(actions.popleft(), cfg.model_family)
-        obs, _, done, _ = env.step(action.tolist())
+        if getattr(policy, "debug_trace", None) is not None:
+            policy.debug_trace["actions"].append(np.asarray(action).tolist())
+        obs, _, done, _ = timed("env_step", lambda: env.step(action.tolist()))
         action_steps += 1
         if done:
             success = True
