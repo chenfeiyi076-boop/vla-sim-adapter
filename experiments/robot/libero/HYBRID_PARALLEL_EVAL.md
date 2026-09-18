@@ -1,5 +1,74 @@
 # Hybrid evaluation: serial reference, partial results and independent workers
 
+## Standard suite selection
+
+All three Hybrid entry points accept `--task-suite`, default `libero_spatial`.
+`hybrid_suite_config.py` maps the four supported suites to their RLDS keys.
+The official `TaskSuite` and `TASK_MAX_STEPS` definitions were moved unchanged
+from `run_libero_eval.py` to the lightweight `libero_suite_config.py`; the official
+evaluator re-exports them. There is one step-limit table, not a Hybrid copy.
+
+| Suite | Statistics/checkpoint dataset key | Max action steps |
+| --- | --- | --- |
+| libero_spatial | libero_spatial_no_noops | 220 |
+| libero_object | libero_object_no_noops | 280 |
+| libero_goal | libero_goal_no_noops | 300 |
+| libero_10 | libero_10_no_noops | 520 |
+
+Statistics JSON must contain the selected dataset key. Trained evaluation checks
+the matching experiment identity from the training registry, dataset key, H/A/P,
+normalization vectors and optional expected step. No cross-suite override exists.
+`run_hybrid_episode` remains the separate random-head single-episode smoke;
+use `run_hybrid_eval` or its parallel launcher for trained checkpoints.
+
+Final results add `task_suite`, `dataset_key`, and `max_episode_steps`; manifests
+add the first two and retain `max_action_steps` with the selected limit. Merge
+still requires identical worker manifests. Resume keeps exact manifest checks;
+do not mix old and new journals within a resumed run. For old-vs-new diagnostic
+comparison only, the comparator derives missing identity fields from old Spatial
+manifests. No episode/action/hash comparisons are relaxed.
+
+Task ownership remains sorted-selected-task ordinal modulo worker count. Every
+task retains one environment and sequential trials in one worker. GPU isolation,
+seed formulas, preprocessing, first-observation traces and action execution are
+unchanged. An empty worker assignment remains valid.
+
+### CUDA0 trained-checkpoint smoke (not 500 episodes)
+
+Only the Spatial checkpoint is currently available. Use the actual statistics
+artifact that matches it, and fresh output/run paths:
+
+```sh
+python -m experiments.robot.libero.run_hybrid_eval_parallel \
+  --num-workers 1 --devices 0 --task-suite libero_spatial \
+  --checkpoint /data/x2227/vla_adapter/VLA-Adapter/runs/hybrid_spatial_phase6d_40k/checkpoints/step-00040000.pt \
+  --vlm-path pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b \
+  --hf-config pretrained_models/configs --statistics /path/to/dataset_statistics.json \
+  --expected-step 40000 --task-id 0 --trials-per-task 2 --debug-trace \
+  --run-dir /path/to/eval/spatial-suite-smoke --output /path/to/eval/spatial-suite-smoke.json
+```
+
+The launcher sets CUDA_VISIBLE_DEVICES=0, local cuda:0, EGL=0 and disables TF GPU.
+First compare a retained old Spatial run with the new run using identical input
+assets, task/trial selection, seed, threads and debug/profile flags:
+
+```sh
+python -m experiments.robot.libero.compare_hybrid_eval \
+  --baseline /path/to/old-spatial/worker-0.partial.json \
+  --candidate /path/to/eval/spatial-suite-smoke/worker-0.partial.json
+```
+
+Check first raw/processed observation hashes, noise/action hashes, full traces,
+zero max action difference and success. Then compare default vs explicit Spatial
+and serial vs four-worker task-sharded smokes. CPU tests do not establish real GPU
+bit identity; these server checks have not been rerun by local development.
+
+After matching checkpoints/statistics exist, repeat the same command in order
+with `--task-suite libero_object`, then `libero_goal`, then `libero_10`, replacing
+checkpoint, statistics, expected step, run directory and output for each suite.
+Do not reuse Spatial weights or disable validation for these smokes. No automatic
+downloads, non-Spatial training, or full benchmark run is part of this change.
+
 This extends evaluation only. Training, checkpoint loaders, normalization, H10,
 Euler integration, execute-first-8, settling, original process_action, max steps,
 success=done, cameras and trial-to-official-state mapping are unchanged. No new

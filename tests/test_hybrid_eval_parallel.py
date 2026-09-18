@@ -303,18 +303,21 @@ def test_worker_crash_terminates_peer():
 
 
 @pytest.mark.parametrize("workers", [1, 4])
-def test_parent_launches_fresh_cpu_processes_and_merges(tmp_path, monkeypatch, workers):
+@pytest.mark.parametrize("task_suite", [None, "libero_spatial", "libero_object"])
+def test_parent_launches_fresh_cpu_processes_and_merges(tmp_path, monkeypatch, workers, task_suite):
     """Real OS processes, fake episode records. Does not exercise CUDA/TF/LIBERO."""
     checkpoint = tmp_path / "model.pt"
     checkpoint.write_bytes(b"checkpoint")
     manifest = dict(checkpoint=str(checkpoint.resolve()), checkpoint_sha256=results.file_hash(checkpoint),
-                    global_step=40000, num_euler_steps=10)
+                    global_step=40000, num_euler_steps=10, task_suite=task_suite or "libero_spatial",
+                    dataset_key=(task_suite or "libero_spatial") + "_no_noops")
     specification = tmp_path / "spec.json"
     specification.write_text(json.dumps(dict(manifest=manifest, specs=specs())))
     real_popen = subprocess.Popen
     spawned = []
     def fake_worker_command(command, **kwargs):
         worker = int(command[command.index("--worker-id") + 1])
+        assert command[command.index("--task-suite") + 1] == (task_suite or "libero_spatial")
         assert kwargs["env"]["CUDA_VISIBLE_DEVICES"] == str(worker)
         assert kwargs["env"]["MUJOCO_EGL_DEVICE_ID"] == "0"
         run_dir = command[command.index("--run-dir") + 1]
@@ -335,10 +338,12 @@ def test_parent_launches_fresh_cpu_processes_and_merges(tmp_path, monkeypatch, w
     output = tmp_path / "final.json"
     parallel.main(["--checkpoint", str(checkpoint), "--run-dir", str(tmp_path / "run"),
                    "--output", str(output), "--num-workers", str(workers),
-                   "--egl-devices", *(["0"] * workers)])
+                   "--egl-devices", *(["0"] * workers),
+                   *(["--task-suite", task_suite] if task_suite else [])])
     assert len({p.pid for p in spawned}) == workers
     assert all(p.returncode == 0 for p in spawned)
     assert json.loads(output.read_text())["total_trials"] == 8
+    assert json.loads(output.read_text())["task_suite"] == (task_suite or "libero_spatial")
     assert not (tmp_path / "run" / "launcher.lock").exists()
 
 

@@ -1,4 +1,4 @@
-"""Independent-process episode sharding. No DDP, shared model or vectorized env."""
+"""Independent-process task sharding. No DDP, shared model or vectorized env."""
 
 import argparse
 import json
@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import signal
+from experiments.robot.libero.hybrid_suite_config import add_task_suite_argument
 
 
 def terminate(signum, frame):
@@ -48,6 +49,7 @@ def worker_environment(threads, physical_gpu):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    add_task_suite_argument(parser)
     parser.add_argument("--num-workers", type=int, choices=(1, 4), default=4)
     parser.add_argument("--devices", type=int, nargs="+", help="Physical GPU IDs, one per worker")
     parser.add_argument("--egl-devices", type=int, nargs="+",
@@ -83,6 +85,7 @@ def main(argv=None):
               file=sys.stderr, flush=True)
         from experiments.robot.libero.run_hybrid_eval import main as serial_main
         serial_main(["--checkpoint", str(args.checkpoint), "--device", "cuda:0",
+                     "--task-suite", args.task_suite,
                      "--partial", str(paths[args.worker_id]), *( ["--resume"] if args.resume else []), *forwarded],
                     worker_id=args.worker_id, num_workers=args.num_workers)
         return
@@ -108,6 +111,7 @@ def main(argv=None):
         for index in range(args.num_workers):
             command = [sys.executable, "-m", "experiments.robot.libero.run_hybrid_eval_parallel",
                 "--worker-id", str(index), "--num-workers", str(args.num_workers),
+                "--task-suite", args.task_suite,
                 "--devices", *map(str, devices),
                 "--threads", str(args.threads), "--run-dir", str(args.run_dir), "--output", str(args.output),
                 "--checkpoint", str(args.checkpoint), *(["--resume"] if args.resume else []), *forwarded]

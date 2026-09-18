@@ -1,11 +1,13 @@
-"""Step-based four-GPU LIBERO-Spatial Hybrid controlled-baseline training."""
+"""Step-based LIBERO Hybrid training on one or four CUDA workers."""
 
 import argparse
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import runpy
 from pathlib import Path
 import sys
+import time
 
 import torch
 import torch.distributed as dist
@@ -15,7 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def parse_args(argv=None):
+    # Load the stateless helper without executing prismatic's eager package imports
+    # before NCCL initialization. CLI and metadata share this one registry.
+    config = runpy.run_path(str(Path(__file__).resolve().parents[1] / "prismatic/training/hybrid_formal.py"))
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset-key", default=config["DEFAULT_HYBRID_DATASET_KEY"],
+                        choices=config["HYBRID_DATASET_CONFIGS"])
     for name in ("vlm-path", "hf-config", "data-root", "run-dir"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--max-steps", type=int, required=True)
@@ -26,12 +33,18 @@ def parse_args(argv=None):
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--shuffle-buffer-size", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--per-device-batch-size", type=int, default=1)
+    parser.add_argument("--benchmark-warmup-steps", type=int,
+                        help="Opt-in CUDA timing; exclude this many initial updates from throughput")
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--no-image-aug", dest="image_aug", action="store_false")
     parser.set_defaults(image_aug=True)
     args = parser.parse_args(argv)
-    if min(args.max_steps, args.save_every, args.log_every, args.shuffle_buffer_size, args.lr_decay_step) < 1 or args.seed < 0:
+    if min(args.max_steps, args.save_every, args.log_every, args.shuffle_buffer_size,
+           args.lr_decay_step, args.per_device_batch_size) < 1 or args.seed < 0:
         parser.error("Step/buffer sizes must be positive and seed nonnegative")
+    if args.benchmark_warmup_steps is not None and not 0 <= args.benchmark_warmup_steps < args.max_steps:
+        parser.error("benchmark-warmup-steps must be nonnegative and smaller than max-steps")
     return args
 
 
@@ -54,12 +67,14 @@ def make_data(args, tokenizer, images, rank, world_size):
     from prismatic.vla.datasets.hybrid_datasets import HybridRLDSDataset, HybridRLDSBatchTransform, PaddedCollatorForHybridFlow
     from prismatic.vla.hybrid_normalization import HybridZScoreNormalizer
 
-    dataset = HybridRLDSDataset(args.data_root, "libero_spatial_no_noops",
+    dataset = HybridRLDSDataset(args.data_root, args.dataset_key,
         HybridRLDSBatchTransform(tokenizer, images.apply_transform), resize_resolution=(224, 224),
         shuffle_buffer_size=args.shuffle_buffer_size, train=True, image_aug=args.image_aug,
         rank=rank, world_size=world_size)
-    statistics = dataset.dataset_statistics["libero_spatial_no_noops"]
-    loader = DataLoader(dataset, batch_size=1, num_workers=0,
+    if args.dataset_key not in dataset.dataset_statistics:
+        raise ValueError(f"Dataset statistics do not contain requested dataset key: {args.dataset_key}")
+    statistics = dataset.dataset_statistics[args.dataset_key]
+    loader = DataLoader(dataset, batch_size=args.per_device_batch_size, num_workers=0,
                         collate_fn=PaddedCollatorForHybridFlow(tokenizer.pad_token_id))
     return loader, HybridZScoreNormalizer(statistics), statistics, str(dataset.resolved_source_split)
 
@@ -68,25 +83,56 @@ def training_loop(ddp_model, loader, normalizer, optimizer, *, args, global_step
     from prismatic.training.hybrid_formal import hybrid_learning_rate, set_optimizer_learning_rate, checkpoint_due
     from prismatic.training.hybrid_multistep import hybrid_training_step
 
+    warmup = getattr(args, "benchmark_warmup_steps", None)
+    if warmup is not None and warmup >= args.max_steps - global_step:
+        raise ValueError("Benchmark requires updates after warmup in this process segment")
     iterator = iter(loader)
+    timings = []
+    peak_allocated = peak_reserved = 0
+    if warmup is not None:
+        torch.cuda.reset_peak_memory_stats()
     while global_step < args.max_steps:
+        if warmup is not None:
+            torch.cuda.synchronize()
+            started = time.perf_counter()
         batch = next(iterator)
-        if batch["actions"].shape != (1, 10, 7) or batch["proprio"].shape != (1, 8):
-            raise ValueError("Formal training requires one H10/A7/P8 sample per rank")
+        if warmup is not None:
+            data_wait_sec = time.perf_counter() - started
+        B = args.per_device_batch_size
+        if batch["actions"].shape != (B, 10, 7) or batch["proprio"].shape != (B, 8):
+            raise ValueError(f"Training requires {B} H10/A7/P8 samples per rank")
         lr = hybrid_learning_rate(global_step, base_lr=args.learning_rate,
                                   decay_step=args.lr_decay_step, decay_factor=args.lr_decay_factor)
         set_optimizer_learning_rate(optimizer, lr)
+        if warmup is not None:
+            compute_started = time.perf_counter()
         diagnostics = hybrid_training_step(ddp_model, batch, normalizer, optimizer, device_type="cuda",
                                            autocast_dtype=torch.bfloat16, autocast_enabled=True)
+        if warmup is not None:
+            torch.cuda.synchronize()
+            compute_sec = time.perf_counter() - compute_started
         global_step += 1
         optimizer.zero_grad(set_to_none=True)
         del batch
+        if warmup is not None:
+            timings.append((time.perf_counter() - started, data_wait_sec, compute_sec))
+            peak_allocated = torch.cuda.max_memory_allocated()
+            peak_reserved = torch.cuda.max_memory_reserved()
         if (global_step % args.log_every == 0 or global_step == args.max_steps
                 or global_step in (args.lr_decay_step, args.lr_decay_step + 1)):
             log_callback(global_step, lr, diagnostics)
         del diagnostics
         if checkpoint_due(global_step, max_steps=args.max_steps, save_every=args.save_every):
             checkpoint_callback(global_step)
+    if warmup is not None:
+        measured = timings[warmup:]
+        seconds, data_wait, compute = (sum(values) / len(measured) for values in zip(*measured))
+        print(json.dumps(dict(benchmark_rank=dist.get_rank(), measured_steps=len(measured),
+            mean_data_wait_sec=data_wait, mean_compute_sec=compute,
+            data_wait_fraction=data_wait / seconds, compute_fraction=compute / seconds,
+            seconds_per_optimizer_step=seconds, samples_per_sec=args.per_device_batch_size / seconds,
+            cuda_peak_allocated_gib=peak_allocated / 2**30,
+            cuda_peak_reserved_gib=peak_reserved / 2**30)), flush=True)
     return global_step
 
 
@@ -114,8 +160,10 @@ def main():
     args = parse_args()
     if not all(path.is_dir() for path in (args.vlm_path, args.hf_config, args.data_root)):
         raise ValueError("Native VLM, HF config and RLDS data directories must exist")
-    if int(os.environ["WORLD_SIZE"]) != 4 or not torch.cuda.is_available():
-        raise RuntimeError("Formal recipe requires exactly four CUDA torchrun workers")
+    if not (args.data_root / args.dataset_key).is_dir():
+        raise FileNotFoundError(f"Requested RLDS dataset {args.dataset_key} is missing: {args.data_root / args.dataset_key}")
+    if int(os.environ.get("WORLD_SIZE", 0)) not in (1, 4) or not torch.cuda.is_available():
+        raise RuntimeError("Use torchrun with one or four CUDA workers")
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
@@ -134,6 +182,10 @@ def main():
         from prismatic.training.hybrid_checkpoint import save_hybrid_checkpoint, load_hybrid_checkpoint
 
         rank, world_size = dist.get_rank(), dist.get_world_size()
+        if rank == 0:
+            print(json.dumps(dict(world_size=world_size, per_device_batch_size=args.per_device_batch_size,
+                gradient_accumulation_steps=1,
+                effective_global_batch_size=world_size * args.per_device_batch_size)), flush=True)
         torch.manual_seed(args.seed)
         encoder, head, tokenizer, images = load_assets(args.vlm_path, args.hf_config)
         model = HybridFlowTrainingModule(encoder, head).to(device)
@@ -145,7 +197,9 @@ def main():
         loader, normalizer, statistics, split = make_data(args, tokenizer, images, rank, world_size)
         splits = gather_report(split)
         metadata = build_formal_metadata(source_splits=splits, statistics=statistics, max_steps=args.max_steps,
-            world_size=world_size, base_learning_rate=args.learning_rate, lr_decay_step=args.lr_decay_step,
+            dataset_key=args.dataset_key,
+            world_size=world_size, local_batch_size=args.per_device_batch_size,
+            base_learning_rate=args.learning_rate, lr_decay_step=args.lr_decay_step,
             lr_decay_factor=args.lr_decay_factor, image_aug=args.image_aug, shuffle_buffer_size=args.shuffle_buffer_size,
             save_every=args.save_every, log_every=args.log_every, seed=args.seed)
         all_metadata = gather_report(metadata)
@@ -186,7 +240,7 @@ def main():
                 raise RuntimeError("Final checkpoint is missing")
         rank_zero_io(verify_final)
         if rank == 0:
-            print("HYBRID SPATIAL FORMAL TRAINING COMPLETED", flush=True)
+            print(f"HYBRID FORMAL TRAINING COMPLETED: dataset_key={args.dataset_key}", flush=True)
     finally:
         dist.destroy_process_group()
 

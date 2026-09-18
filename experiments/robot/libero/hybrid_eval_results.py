@@ -9,6 +9,7 @@ import tempfile
 from contextlib import contextmanager
 
 import numpy as np
+from experiments.robot.libero.hybrid_suite_config import suite_from_manifest
 
 
 class PlannedStop(Exception):
@@ -89,7 +90,8 @@ def worker_assignment(worker_id, num_workers):
     return assignment
 
 
-def validate_records(records, specs, allowed, *, complete=False):
+def validate_records(records, specs, allowed, *, complete=False, manifest=None):
+    max_steps = suite_from_manifest(manifest or {}).max_steps
     expected = {s["global_episode_id"]: s for s in specs}
     seen = set()
     if not isinstance(records, list):
@@ -113,8 +115,8 @@ def validate_records(records, specs, allowed, *, complete=False):
                 raise ValueError(f"Invalid {key}")
         if record["policy_calls"] != (record["action_steps"] + 7) // 8:
             raise ValueError("Invalid H10/execute8 episode counters")
-        if record["action_steps"] > 220:
-            raise ValueError("Episode exceeds Spatial max steps")
+        if record["action_steps"] > max_steps:
+            raise ValueError("Episode exceeds selected suite max steps")
         elapsed = record.get("elapsed_sec")
         if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed) or elapsed < 0:
             raise ValueError("Invalid elapsed_sec")
@@ -140,7 +142,7 @@ class EpisodeJournal:
                     or payload.get("assignment") != self.assignment):
                 raise ValueError("Partial run identity/assignment mismatch")
             self.records = payload["records"]
-        self.completed = validate_records(self.records, specs, self.allowed)
+        self.completed = validate_records(self.records, specs, self.allowed, manifest=self.manifest)
         if self.path is not None and not self.path.exists():
             self.publish(overwrite=False)
 
@@ -151,13 +153,13 @@ class EpisodeJournal:
 
     def append(self, record):
         records = self.records + [record]
-        completed = validate_records(records, self.specs, self.allowed)
+        completed = validate_records(records, self.specs, self.allowed, manifest=self.manifest)
         self.records = records
         self.publish()
         self.completed = completed
 
     def require_complete(self):
-        validate_records(self.records, self.specs, self.allowed, complete=True)
+        validate_records(self.records, self.specs, self.allowed, complete=True, manifest=self.manifest)
 
 
 def aggregate(records):
@@ -186,11 +188,13 @@ def merge_partials(paths, *, checkpoint):
                 or payload["assignment"] != worker_assignment(index, len(paths))):
             raise ValueError("Worker identity mismatch")
         validate_records(payload["records"], first["episodes"],
-                         assigned_ids(first["episodes"], index, len(paths)), complete=True)
+                         assigned_ids(first["episodes"], index, len(paths)), complete=True, manifest=first["manifest"])
         records.extend(payload["records"])
-    validate_records(records, first["episodes"], assigned_ids(first["episodes"]), complete=True)
+    validate_records(records, first["episodes"], assigned_ids(first["episodes"]), complete=True, manifest=first["manifest"])
     manifest = first["manifest"]
+    selected = suite_from_manifest(manifest)
     if str(Path(checkpoint).resolve()) != manifest["checkpoint"] or file_hash(checkpoint) != manifest["checkpoint_sha256"]:
         raise ValueError("Checkpoint changed during evaluation")
     return dict(checkpoint=str(checkpoint), global_step=manifest["global_step"],
+                **selected.identity(), max_episode_steps=selected.max_steps,
                 num_euler_steps=manifest["num_euler_steps"], num_open_loop_steps=8, **aggregate(records))

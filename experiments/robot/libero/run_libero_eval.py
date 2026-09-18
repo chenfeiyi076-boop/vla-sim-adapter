@@ -10,7 +10,6 @@ import os
 import sys
 from collections import deque
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 from typing import Optional, Union
 
@@ -50,23 +49,7 @@ from experiments.robot.robot_utils import (
 from prismatic.vla.constants import NUM_ACTIONS_CHUNK
 
 
-# Define task suite constants
-class TaskSuite(str, Enum):
-    LIBERO_SPATIAL = "libero_spatial"
-    LIBERO_OBJECT = "libero_object"
-    LIBERO_GOAL = "libero_goal"
-    LIBERO_10 = "libero_10"
-    LIBERO_90 = "libero_90"
-
-
-# Define max steps for each task suite
-TASK_MAX_STEPS = {
-    TaskSuite.LIBERO_SPATIAL: 220,  # longest training demo has 193 steps
-    TaskSuite.LIBERO_OBJECT: 280,  # longest training demo has 254 steps
-    TaskSuite.LIBERO_GOAL: 300,  # longest training demo has 270 steps
-    TaskSuite.LIBERO_10: 520,  # longest training demo has 505 steps
-    TaskSuite.LIBERO_90: 400,  # longest training demo has 373 steps
-}
+from experiments.robot.libero.libero_suite_config import TaskSuite, TASK_MAX_STEPS
 
 
 # Set up logging

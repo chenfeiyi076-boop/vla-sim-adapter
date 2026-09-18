@@ -10,6 +10,21 @@ import tempfile
 import torch
 
 
+DEFAULT_HYBRID_DATASET_KEY = "libero_spatial_no_noops"
+HYBRID_DATASET_CONFIGS = {
+    "libero_spatial_no_noops": {"experiment": "hybrid_spatial_formal_v1"},
+    "libero_object_no_noops": {"experiment": "hybrid_object_formal_v1"},
+    "libero_goal_no_noops": {"experiment": "hybrid_goal_formal_v1"},
+    "libero_10_no_noops": {"experiment": "hybrid_10_formal_v1"},
+}
+
+
+def formal_experiment_name(dataset_key):
+    if not isinstance(dataset_key, str) or dataset_key not in HYBRID_DATASET_CONFIGS:
+        raise ValueError(f"Unsupported Hybrid formal dataset key: {dataset_key}")
+    return HYBRID_DATASET_CONFIGS[dataset_key]["experiment"]
+
+
 def _positive_int(name, value):
     if type(value) is not int or value < 1:
         raise ValueError(f"{name} must be a positive integer")
@@ -80,20 +95,22 @@ def validate_normalization_metadata(expected, actual, *, atol=1e-5, rtol=1e-5):
 
 
 def build_formal_metadata(*, source_splits, statistics, max_steps, world_size=4, local_batch_size=1,
+                          dataset_key=DEFAULT_HYBRID_DATASET_KEY,
                           base_learning_rate=1e-6, lr_decay_step=30000, lr_decay_factor=.1,
                           image_aug=True, shuffle_buffer_size=10000, save_every=10000, log_every=20, seed=7):
     hybrid_learning_rate(0, base_lr=base_learning_rate, decay_step=lr_decay_step, decay_factor=lr_decay_factor)
     for name, value in (("max_steps", max_steps), ("shuffle_buffer_size", shuffle_buffer_size),
                         ("save_every", save_every), ("log_every", log_every)):
         _positive_int(name, value)
-    if type(world_size) is not int or world_size != 4 or type(local_batch_size) is not int or local_batch_size != 1:
-        raise ValueError("Formal recipe requires world_size=4 and local_batch_size=1")
+    _positive_int("local_batch_size", local_batch_size)
+    if type(world_size) is not int or world_size not in (1, 4):
+        raise ValueError("Training requires world_size=1 or 4")
     if (len(source_splits) != world_size or any(not isinstance(s, str) or not s for s in source_splits)
             or len(set(source_splits)) != world_size):
-        raise ValueError("Require four distinct ordered source-split strings")
+        raise ValueError("Require one distinct ordered source-split string per rank")
     if type(image_aug) is not bool or type(seed) is not int or seed < 0:
         raise ValueError("image_aug must be bool; seed must be a nonnegative integer")
-    return dict(experiment="hybrid_spatial_formal_v1", dataset_key="libero_spatial_no_noops",
+    return dict(experiment=formal_experiment_name(dataset_key), dataset_key=dataset_key,
                 world_size=world_size, local_batch_size=local_batch_size,
                 effective_global_batch_size=world_size * local_batch_size,
                 action_horizon=10, action_dim=7, proprio_dim=8, optimizer="AdamW",

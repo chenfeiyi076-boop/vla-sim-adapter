@@ -218,7 +218,7 @@ def test_load_policy_uses_native_and_config_assets(dependencies, monkeypatch):
             flow.SimVLAFlowActionHead(hidden_dim=16, depth=1, num_heads=2)),
         "experiments.robot.libero.hybrid_policy": SimpleNamespace(
             HybridLiberoPolicy=bridge.HybridLiberoPolicy,
-            load_hybrid_normalizer=lambda path: normalization.HybridZScoreNormalizer(statistics())),
+                load_hybrid_normalizer=lambda path, task_suite: normalization.HybridZScoreNormalizer(statistics())),
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
     p = runner.load_policy("native-assets", "hf-assets", "stats.json", "cpu", 10, True)
@@ -260,7 +260,7 @@ def test_exact_dataset_key(dependencies, tmp_path):
     path.write_text(json.dumps({"libero_spatial": statistics()}))
     with pytest.raises(ValueError, match="no fallback"):
         bridge.load_hybrid_normalizer(path)
-    path.write_text(json.dumps({bridge.DATASET_KEY: statistics()}))
+    path.write_text(json.dumps({"libero_spatial_no_noops": statistics()}))
     norm = bridge.load_hybrid_normalizer(path)
     assert norm.action_mean.tolist() == [.25] * 7
 

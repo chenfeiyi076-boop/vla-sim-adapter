@@ -69,11 +69,13 @@ def test_runtime_errors_propagate_and_environment_closes(libero):
     assert libero.environments[0].closed
 
 
-@pytest.mark.parametrize("mismatch", [None, "tiny", "normalization", "step", "structure", "missing_normalization"])
-def test_trained_loading_validation_before_rollout(tmp_path, monkeypatch, libero, mismatch):
+@pytest.mark.parametrize("task_suite", ["libero_spatial", "libero_object", "libero_goal", "libero_10"])
+@pytest.mark.parametrize("mismatch", [None, "tiny", "normalization", "step", "structure", "missing_normalization", "dataset"])
+def test_trained_loading_validation_before_rollout(tmp_path, monkeypatch, libero, mismatch, task_suite):
+    key = task_suite + "_no_noops"
     stats = {kind: {"mean": [0.] * dim, "std": [1.] * dim} for kind, dim in (("action", 7), ("proprio", 8))}
     stats_path = tmp_path / "stats.json"
-    stats_path.write_text(json.dumps({"libero_spatial_no_noops": stats}))
+    stats_path.write_text(json.dumps({key: stats}))
     normalized = formal.normalization_metadata(stats)
     if mismatch == "normalization":
         normalized["action"]["mean"][0] = 1e-3
@@ -81,25 +83,30 @@ def test_trained_loading_validation_before_rollout(tmp_path, monkeypatch, libero
         normalized["proprio"]["mean"][0] = 7e-6
     policy = SimpleNamespace(encoder=torch.nn.Linear(2, 2), flow_head=torch.nn.Linear(2, 2))
     payload = dict(format_version=1, global_step=100, encoder=policy.encoder.state_dict(), flow_head=policy.flow_head.state_dict(),
-        metadata=dict(experiment="hybrid_spatial_formal_v1", dataset_key="libero_spatial_no_noops",
+        metadata=dict(experiment=formal.formal_experiment_name(key), dataset_key=key,
                       action_horizon=10, action_dim=7, proprio_dim=8, normalization_statistics=normalized))
     if mismatch == "structure":
         payload["metadata"]["action_horizon"] = 8
     elif mismatch == "missing_normalization":
         del payload["metadata"]["normalization_statistics"]
+    elif mismatch == "dataset":
+        payload["metadata"]["dataset_key"] = "libero_spatial_no_noops" if task_suite != "libero_spatial" else "libero_object_no_noops"
     path = tmp_path / "trained.pt"
     torch.save(payload, path)
-    libero.episode_api.load_policy = lambda *args: policy
+    def load_policy(*args):
+        assert args[-1] == task_suite
+        return policy
+    libero.episode_api.load_policy = load_policy
     monkeypatch.setitem(sys.modules, "prismatic.training.hybrid_checkpoint", checkpoint)
     monkeypatch.setitem(sys.modules, "prismatic.training.hybrid_formal", formal)
     args = SimpleNamespace(statistics=stats_path, checkpoint=path, expected_step=99 if mismatch == "step" else 100,
-                           vlm_path="native", hf_config="config", device="cpu", num_steps=10)
+                           vlm_path="native", hf_config="config", device="cpu", num_steps=10, task_suite=task_suite)
     if mismatch not in (None, "tiny"):
         with pytest.raises(ValueError):
             evaluation.load_trained_policy(args)
         monkeypatch.setattr(sys, "argv", ["eval", "--checkpoint", str(path), "--vlm-path", "native",
             "--hf-config", "config", "--statistics", str(stats_path), "--device", "cpu",
-            "--expected-step", str(args.expected_step), "--trials-per-task", "1"])
+            "--expected-step", str(args.expected_step), "--trials-per-task", "1", "--task-suite", task_suite])
         with pytest.raises(ValueError):
             evaluation.main()
         assert not libero.calls and not libero.environments
@@ -109,14 +116,18 @@ def test_trained_loading_validation_before_rollout(tmp_path, monkeypatch, libero
         assert not loaded.encoder.training and not loaded.flow_head.training
 
 
-def test_result_schema_zero_success_and_atomic_output(libero, monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("task_suite", [None, "libero_spatial", "libero_goal"])
+def test_result_schema_zero_success_and_atomic_output(libero, monkeypatch, tmp_path, capsys, task_suite):
+    selected = task_suite or "libero_spatial"
+    libero.api.benchmark = SimpleNamespace(get_benchmark_dict=lambda: {selected: lambda: libero.suite})
     libero.episode_api.run_single_episode = lambda *args: dict(success=False, policy_calls=1, action_steps=8)
     monkeypatch.setattr(evaluation, "load_trained_policy", lambda *a, **kw: (None, {"global_step": 100}))
     monkeypatch.setattr(evaluation, "build_manifest", lambda *a: {"schema_version": 1})
     monkeypatch.setitem(sys.modules, "prismatic.training.hybrid_formal", formal)
     output = tmp_path / "result.json"
     monkeypatch.setattr(sys, "argv", ["eval", "--checkpoint", "trained.pt", "--vlm-path", "native",
-        "--hf-config", "config", "--statistics", "stats.json", "--trials-per-task", "2", "--output", str(output)])
+        "--hf-config", "config", "--statistics", "stats.json", "--trials-per-task", "2", "--output", str(output),
+        *(["--task-suite", task_suite] if task_suite else [])])
     evaluation.main()
     result = json.loads(output.read_text())
     assert result == json.loads(capsys.readouterr().out)
@@ -125,6 +136,10 @@ def test_result_schema_zero_success_and_atomic_output(libero, monkeypatch, tmp_p
     partial = output.with_name(output.name + ".partial.json")
     assert set(tmp_path.iterdir()) == {output, partial}
     assert len(json.loads(partial.read_text())["records"]) == 4
+    assert result["task_suite"] == selected and result["dataset_key"] == selected + "_no_noops"
+    assert result["max_episode_steps"] == (300 if selected == "libero_goal" else 220)
+    manifest = json.loads(partial.read_text())["manifest"]
+    assert manifest["task_suite"] == selected and manifest["dataset_key"] == result["dataset_key"]
 
 
 def test_atomic_output_failure_preserves_existing_file(tmp_path, monkeypatch):

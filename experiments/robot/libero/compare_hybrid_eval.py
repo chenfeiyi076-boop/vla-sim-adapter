@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from experiments.robot.libero.hybrid_eval_results import assigned_ids, validate_records
+from experiments.robot.libero.hybrid_suite_config import suite_from_manifest
 
 
 def read_records(paths):
@@ -18,10 +19,12 @@ def read_records(paths):
             raise ValueError("Mixed runs in comparison input")
         assignment = payload["assignment"]
         validate_records(payload["records"], first["episodes"],
-            assigned_ids(first["episodes"], **assignment), complete=True)
+            assigned_ids(first["episodes"], **assignment), complete=True, manifest=first["manifest"])
         records.extend(payload["records"])
-    validate_records(records, first["episodes"], assigned_ids(first["episodes"]), complete=True)
-    return first["manifest"], {r["global_episode_id"]: r for r in records}
+    validate_records(records, first["episodes"], assigned_ids(first["episodes"]), complete=True, manifest=first["manifest"])
+    # Canonicalize additive identity fields for comparison with old Spatial traces only.
+    manifest = dict(first["manifest"], **suite_from_manifest(first["manifest"]).identity())
+    return manifest, {r["global_episode_id"]: r for r in records}
 
 
 def compare(baseline, candidate):

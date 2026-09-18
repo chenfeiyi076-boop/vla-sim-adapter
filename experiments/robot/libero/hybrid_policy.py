@@ -7,18 +7,14 @@ import torch
 import time
 
 
-DATASET_KEY = "libero_spatial_no_noops"
+from experiments.robot.libero.hybrid_suite_config import DEFAULT_TASK_SUITE, read_suite_statistics
 
 
-def load_hybrid_normalizer(path):
+def load_hybrid_normalizer(path, task_suite=DEFAULT_TASK_SUITE):
     """Require the original RLDS dataset_statistics.json, with the exact dataset key."""
     from prismatic.vla.hybrid_normalization import HybridZScoreNormalizer
 
-    with Path(path).open(encoding="utf-8") as stream:
-        statistics = json.load(stream)
-    if DATASET_KEY not in statistics:
-        raise ValueError(f"RLDS statistics must contain {DATASET_KEY}; no fallback is allowed")
-    return HybridZScoreNormalizer(statistics[DATASET_KEY])
+    return HybridZScoreNormalizer(read_suite_statistics(path, task_suite))
 
 
 def check_tensor(name, value, shape):

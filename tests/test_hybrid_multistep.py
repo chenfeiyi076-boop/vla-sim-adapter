@@ -5,6 +5,7 @@ from collections import OrderedDict
 from contextlib import nullcontext
 import copy
 import math
+import json
 import sys
 from types import SimpleNamespace
 
@@ -121,6 +122,59 @@ def test_plain_outer_module_supported(setup):
     result = step_module.hybrid_training_step(ddp.module, batch, normalizer, optimizer,
                                               device_type="cpu", autocast_enabled=False)
     assert math.isfinite(result["loss"]) and optimizer.steps == 1
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+@pytest.mark.parametrize("benchmark", [False, True])
+def test_formal_loop_physical_batch_one_update(setup, monkeypatch, capsys, batch_size, benchmark):
+    ddp, batch, normalizer, optimizer = setup
+    batch = {k: v[:batch_size] for k, v in batch.items()}
+    trainer = standalone("vla-scripts/train_hybrid_spatial.py")
+    formal = standalone("prismatic/training/hybrid_formal.py")
+    monkeypatch.setitem(sys.modules, "prismatic.training.hybrid_formal", formal)
+    shapes = []
+    def record_shapes(module, args, output):
+        features, noisy, proprio, t, mask = args
+        shapes.append((noisy.shape, proprio.shape, t.shape, output.shape))
+    ddp.module.flow_head.register_forward_hook(record_shapes)
+    def cpu_step(*args, **kwargs):
+        return step_module.hybrid_training_step(*args, device_type="cpu", autocast_enabled=True)
+    monkeypatch.setitem(sys.modules, "prismatic.training.hybrid_multistep",
+                        SimpleNamespace(hybrid_training_step=cpu_step))
+    logs, saves = [], []
+    args = SimpleNamespace(max_steps=3, per_device_batch_size=batch_size, learning_rate=1e-6,
+        lr_decay_step=30000, lr_decay_factor=.1, log_every=1, save_every=3)
+    if benchmark:
+        args.benchmark_warmup_steps = 1
+        # Warmup is deliberately slow; measured steps have unequal data/compute times.
+        ticks = iter([0, 10, 11, 31, 32,
+                      40, 42, 42.01, 48.01, 48.02,
+                      50, 54, 54.01, 64.01, 64.02])
+        monkeypatch.setattr(trainer.time, "perf_counter", lambda: next(ticks))
+        sync_calls = []
+        monkeypatch.setattr(torch.cuda, "synchronize", lambda: sync_calls.append(optimizer.steps))
+        monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+        monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 2**30)
+        monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda: 2 * 2**30)
+        monkeypatch.setattr(trainer.dist, "get_rank", lambda: 0)
+    end = trainer.training_loop(ddp, [batch] * 3, normalizer, optimizer, args=args, global_step=0,
+        log_callback=lambda s, lr, diag: logs.append((s, lr, diag)), checkpoint_callback=saves.append)
+    assert end == ddp.calls == optimizer.steps == 3
+    assert smoke.optimizer_step_range(optimizer) == (3, 3)
+    assert shapes == [((batch_size, 10, 7), (batch_size, 8), (batch_size,), (batch_size, 10, 7))] * 3
+    assert [s for s, _, _ in logs] == [1, 2, 3] and saves == [3]
+    assert all(lr == 1e-6 and diag["batch_size"] == batch_size and math.isfinite(diag["loss"])
+               for _, lr, diag in logs)
+    assert optimizer.zeros == 6  # One pre-backward clear and the existing post-update cleanup per step.
+    if benchmark:
+        report = json.loads(capsys.readouterr().out)
+        assert report == pytest.approx(dict(benchmark_rank=0, measured_steps=2,
+            seconds_per_optimizer_step=11.02, samples_per_sec=batch_size / 11.02,
+            mean_data_wait_sec=3., mean_compute_sec=8.,
+            data_wait_fraction=3. / 11.02, compute_fraction=8. / 11.02,
+            cuda_peak_allocated_gib=1., cuda_peak_reserved_gib=2.))
+        assert sync_calls == [0, 1, 1, 2, 2, 3]
+        assert report["seconds_per_optimizer_step"] - report["mean_data_wait_sec"] - report["mean_compute_sec"] == pytest.approx(.02)
 
 
 def test_runner_continuous_iterator_and_memory_reporting(setup, monkeypatch):

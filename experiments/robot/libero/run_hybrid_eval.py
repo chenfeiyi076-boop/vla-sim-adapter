@@ -1,4 +1,4 @@
-"""Trained-checkpoint Hybrid LIBERO-Spatial evaluation; official action path unchanged."""
+"""Trained-checkpoint Hybrid LIBERO evaluation; official action path unchanged."""
 
 import argparse
 import json
@@ -7,20 +7,23 @@ import time
 from pathlib import Path
 
 import torch
+from experiments.robot.libero.hybrid_suite_config import (
+    DEFAULT_TASK_SUITE, add_task_suite_argument, get_hybrid_libero_suite_config, read_suite_statistics,
+)
 
 
 def load_trained_policy(args, *, center_crop=True):
     from experiments.robot.libero.run_hybrid_episode import load_policy
     from prismatic.training.hybrid_checkpoint import load_hybrid_model_checkpoint
-    from prismatic.training.hybrid_formal import normalization_metadata, validate_normalization_metadata
+    from prismatic.training.hybrid_formal import normalization_metadata, validate_normalization_metadata, formal_experiment_name
 
-    with args.statistics.open(encoding="utf-8") as stream:
-        statistics = json.load(stream)
-    normalization = normalization_metadata(statistics["libero_spatial_no_noops"])
+    selected = get_hybrid_libero_suite_config(getattr(args, "task_suite", DEFAULT_TASK_SUITE))
+    normalization = normalization_metadata(read_suite_statistics(args.statistics, selected.task_suite))
     # Existing load_policy uses HybridLiberoPolicy and load_hybrid_normalizer.
-    policy = load_policy(args.vlm_path, args.hf_config, args.statistics, args.device, args.num_steps, center_crop)
+    policy = load_policy(args.vlm_path, args.hf_config, args.statistics, args.device, args.num_steps, center_crop,
+                         selected.task_suite)
     info = load_hybrid_model_checkpoint(args.checkpoint, policy.encoder, policy.flow_head,
-        expected_metadata=dict(experiment="hybrid_spatial_formal_v1", dataset_key="libero_spatial_no_noops",
+        expected_metadata=dict(experiment=formal_experiment_name(selected.dataset_key), dataset_key=selected.dataset_key,
             action_horizon=10, action_dim=7, proprio_dim=8))
     if "normalization_statistics" not in info["metadata"]:
         raise ValueError("Checkpoint metadata missing normalization_statistics")
@@ -53,7 +56,7 @@ def _evaluate_tasks(cfg, suite, policy, *, trials_per_task, task_id=None, seed=7
     if cfg.num_open_loop_steps != 8:
         raise ValueError("Hybrid evaluation requires the validated 8-step execution window")
     if task_id is not None and (type(task_id) is not int or not 0 <= task_id < suite.n_tasks):
-        raise ValueError("task_id is outside LIBERO-Spatial")
+        raise ValueError("task_id is outside the selected LIBERO suite")
     ids = task_ids if task_ids is not None else (list(range(suite.n_tasks)) if task_id is None else [task_id])
     if not ids or len(set(ids)) != len(ids) or any(type(i) is not int or not 0 <= i < suite.n_tasks for i in ids):
         raise ValueError("Invalid selected task IDs")
@@ -73,7 +76,9 @@ def _evaluate_tasks(cfg, suite, policy, *, trials_per_task, task_id=None, seed=7
             task = suite.get_task(index)
             if hasattr(task, "language"):
                 specs[-1]["task_description"] = task.language
-    manifest = dict(manifest or {}, selected_task_ids=ids, trials_per_task=trials_per_task,
+    selected = get_hybrid_libero_suite_config(getattr(cfg, "task_suite_name", DEFAULT_TASK_SUITE))
+    manifest = dict(manifest or {}, **selected.identity(), max_action_steps=selected.max_steps,
+                    selected_task_ids=ids, trials_per_task=trials_per_task,
                     base_seed=seed, rng_mode="global-reference" if reference else "episode-generator")
     journal = EpisodeJournal(partial, manifest, specs, resume=resume, worker_id=worker_id, num_workers=num_workers)
     start = time.monotonic()
@@ -138,8 +143,10 @@ def build_manifest(args, cfg, policy, info):
     from experiments.robot.libero.hybrid_eval_results import file_hash
     from experiments.robot.robot_utils import get_image_resize_size
     from prismatic.training.hybrid_formal import normalization_metadata
-    statistics = json.loads(args.statistics.read_text(encoding="utf-8"))["libero_spatial_no_noops"]
+    selected = get_hybrid_libero_suite_config(cfg.task_suite_name)
+    statistics = read_suite_statistics(args.statistics, selected.task_suite)
     return dict(schema_version=1, checkpoint=str(args.checkpoint.resolve()),
+        **selected.identity(),
         checkpoint_sha256=file_hash(args.checkpoint), global_step=info["global_step"],
         task_suite_name=str(cfg.task_suite_name), checkpoint_metadata=info["metadata"],
         normalization_statistics=normalization_metadata(statistics),
@@ -147,7 +154,7 @@ def build_manifest(args, cfg, policy, info):
         num_euler_steps=args.num_steps, num_open_loop_steps=cfg.num_open_loop_steps,
         resize_size=get_image_resize_size(cfg), env_img_res=cfg.env_img_res,
         num_steps_wait=cfg.num_steps_wait, center_crop=cfg.center_crop,
-        model_family=cfg.model_family, max_action_steps=220,
+        model_family=cfg.model_family, max_action_steps=selected.max_steps,
         encoder_dtype=str(next(policy.encoder.parameters()).dtype),
         head_dtype=str(next(policy.flow_head.parameters()).dtype),
         vlm_path=str(args.vlm_path.resolve()), hf_config=str(args.hf_config.resolve()),
@@ -158,6 +165,7 @@ def build_manifest(args, cfg, policy, info):
 
 def main(argv=None, *, worker_id=0, num_workers=1):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    add_task_suite_argument(parser)
     for name in ("checkpoint", "vlm-path", "hf-config", "statistics"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
@@ -194,7 +202,8 @@ def main(argv=None, *, worker_id=0, num_workers=1):
     from experiments.robot.libero.run_libero_eval import GenerateConfig, TaskSuite, benchmark, set_seed_everywhere
     from prismatic.training.hybrid_formal import atomic_write_json
 
-    cfg = GenerateConfig(task_suite_name=TaskSuite.LIBERO_SPATIAL, num_open_loop_steps=8, seed=args.seed)
+    selected = get_hybrid_libero_suite_config(args.task_suite)
+    cfg = GenerateConfig(task_suite_name=selected.task_suite, num_open_loop_steps=8, seed=args.seed)
     set_seed_everywhere(args.seed)
     load_start = time.monotonic()
     policy, info = load_trained_policy(args, center_crop=cfg.center_crop)
@@ -205,6 +214,7 @@ def main(argv=None, *, worker_id=0, num_workers=1):
     from experiments.robot.libero.hybrid_eval_results import PlannedStop
     try:
         result = dict(checkpoint=str(args.checkpoint), global_step=info["global_step"],
+            **selected.identity(), max_episode_steps=selected.max_steps,
             num_euler_steps=args.num_steps, num_open_loop_steps=cfg.num_open_loop_steps,
             **evaluate_tasks(cfg, suite, policy, trials_per_task=args.trials_per_task, task_id=args.task_id,
                 task_ids=args.task_ids, seed=args.seed, partial=args.partial, manifest=manifest,

@@ -1,4 +1,4 @@
-"""Explicit Hybrid-only entry point: one Spatial task, one episode, random flow head.
+"""Explicit Hybrid-only entry point: one LIBERO task, one episode, random flow head.
 
 Run from repository root with python -m experiments.robot.libero.run_hybrid_episode.
 Uses a native VLM, local HF configuration assets and original RLDS statistics.
@@ -11,6 +11,9 @@ from pathlib import Path
 
 import numpy as np
 import time
+from experiments.robot.libero.hybrid_suite_config import (
+    DEFAULT_TASK_SUITE, add_task_suite_argument, get_hybrid_libero_suite_config,
+)
 
 
 def run_single_episode(cfg, env, description, policy, initial_state):
@@ -103,7 +106,7 @@ def load_native_weights(encoder, native):
         raise ValueError(f"Invalid native VLM weights: missing={critical_missing}, unexpected={unexpected}")
 
 
-def load_policy(vlm_path, hf_config, statistics, device, num_steps, center_crop):
+def load_policy(vlm_path, hf_config, statistics, device, num_steps, center_crop, task_suite=DEFAULT_TASK_SUITE):
     from transformers import AutoTokenizer
     from prismatic.models import load
     from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
@@ -112,7 +115,7 @@ def load_policy(vlm_path, hf_config, statistics, device, num_steps, center_crop)
     from prismatic.models.flow_action_head import SimVLAFlowActionHead
     from experiments.robot.libero.hybrid_policy import HybridLiberoPolicy, load_hybrid_normalizer
 
-    normalizer = load_hybrid_normalizer(statistics)
+    normalizer = load_hybrid_normalizer(statistics, task_suite)
     config = OpenVLAConfig.from_pretrained(hf_config, local_files_only=True)
     if config.text_config.hidden_size != 896 or config.text_config.model_type != "qwen2":
         raise ValueError("Expected the Prismatic Qwen2.5-0.5B backbone (hidden_size=896)")
@@ -137,6 +140,7 @@ def load_policy(vlm_path, hf_config, statistics, device, num_steps, center_crop)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    add_task_suite_argument(parser)
     parser.add_argument("--policy", required=True, choices=["hybrid"])
     parser.add_argument("--vlm-path", required=True, type=Path)
     parser.add_argument("--hf-config", required=True, type=Path)
@@ -156,19 +160,21 @@ def main():
         GenerateConfig, TaskSuite, benchmark, get_libero_env, load_initial_states, set_seed_everywhere,
     )
 
-    cfg = GenerateConfig(task_suite_name=TaskSuite.LIBERO_SPATIAL, seed=args.seed, num_trials_per_task=1)
+    selected = get_hybrid_libero_suite_config(args.task_suite)
+    cfg = GenerateConfig(task_suite_name=selected.task_suite, seed=args.seed, num_trials_per_task=1)
     set_seed_everywhere(cfg.seed)
     suite = benchmark.get_benchmark_dict()[cfg.task_suite_name]()
     if not 0 <= args.task_id < suite.n_tasks:
-        parser.error("--task-id is outside LIBERO-Spatial")
+        parser.error("--task-id is outside the selected LIBERO suite")
     states, _ = load_initial_states(cfg, suite, args.task_id)
     if not 0 <= args.initial_state_index < len(states):
         parser.error("--initial-state-index is outside the task's initial states")
-    policy = load_policy(args.vlm_path, args.hf_config, args.statistics, args.device, args.num_steps, cfg.center_crop)
+    policy = load_policy(args.vlm_path, args.hf_config, args.statistics, args.device, args.num_steps, cfg.center_crop, args.task_suite)
     env, description = get_libero_env(suite.get_task(args.task_id), cfg.model_family, resolution=cfg.env_img_res)
     try:
         result = run_single_episode(cfg, env, description, policy, states[args.initial_state_index])
-        print({"policy": "hybrid (random/untrained)", "task_id": args.task_id, "episodes": 1, **result})
+        print({"policy": "hybrid (random/untrained)", "task_id": args.task_id, "episodes": 1,
+               **selected.identity(), "max_episode_steps": selected.max_steps, **result})
     finally:
         env.close()
 
