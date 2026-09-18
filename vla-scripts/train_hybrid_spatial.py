@@ -27,6 +27,7 @@ def parse_args(argv=None):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--max-steps", type=int, required=True)
     parser.add_argument("--learning-rate", type=float, default=1e-6)
+    parser.add_argument("--flow-head-learning-rate", type=float, default=None)
     parser.add_argument("--lr-decay-step", type=int, default=30000)
     parser.add_argument("--lr-decay-factor", type=float, default=.1)
     parser.add_argument("--save-every", type=int, default=10000)
@@ -40,6 +41,11 @@ def parse_args(argv=None):
     parser.add_argument("--no-image-aug", dest="image_aug", action="store_false")
     parser.set_defaults(image_aug=True)
     args = parser.parse_args(argv)
+    try:
+        args.flow_head_learning_rate = config["effective_flow_head_learning_rate"](
+            args.learning_rate, args.flow_head_learning_rate)
+    except ValueError as error:
+        parser.error(str(error))
     if min(args.max_steps, args.save_every, args.log_every, args.shuffle_buffer_size,
            args.lr_decay_step, args.per_device_batch_size) < 1 or args.seed < 0:
         parser.error("Step/buffer sizes must be positive and seed nonnegative")
@@ -80,7 +86,9 @@ def make_data(args, tokenizer, images, rank, world_size):
 
 
 def training_loop(ddp_model, loader, normalizer, optimizer, *, args, global_step, log_callback, checkpoint_callback):
-    from prismatic.training.hybrid_formal import hybrid_learning_rate, set_optimizer_learning_rate, checkpoint_due
+    from prismatic.training.hybrid_formal import (
+        hybrid_learning_rate, set_optimizer_learning_rates, effective_flow_head_learning_rate, checkpoint_due,
+    )
     from prismatic.training.hybrid_multistep import hybrid_training_step
 
     warmup = getattr(args, "benchmark_warmup_steps", None)
@@ -103,7 +111,10 @@ def training_loop(ddp_model, loader, normalizer, optimizer, *, args, global_step
             raise ValueError(f"Training requires {B} H10/A7/P8 samples per rank")
         lr = hybrid_learning_rate(global_step, base_lr=args.learning_rate,
                                   decay_step=args.lr_decay_step, decay_factor=args.lr_decay_factor)
-        set_optimizer_learning_rate(optimizer, lr)
+        head_lr = hybrid_learning_rate(global_step,
+            base_lr=effective_flow_head_learning_rate(args.learning_rate, getattr(args, "flow_head_learning_rate", None)),
+            decay_step=args.lr_decay_step, decay_factor=args.lr_decay_factor)
+        set_optimizer_learning_rates(optimizer, vlm_lr=lr, flow_head_lr=head_lr)
         if warmup is not None:
             compute_started = time.perf_counter()
         diagnostics = hybrid_training_step(ddp_model, batch, normalizer, optimizer, device_type="cuda",
@@ -120,6 +131,7 @@ def training_loop(ddp_model, loader, normalizer, optimizer, *, args, global_step
             peak_reserved = torch.cuda.max_memory_reserved()
         if (global_step % args.log_every == 0 or global_step == args.max_steps
                 or global_step in (args.lr_decay_step, args.lr_decay_step + 1)):
+            diagnostics.update(vlm_learning_rate=lr, flow_head_learning_rate=head_lr)
             log_callback(global_step, lr, diagnostics)
         del diagnostics
         if checkpoint_due(global_step, max_steps=args.max_steps, save_every=args.save_every):
@@ -147,7 +159,8 @@ def write_log(run_dir, step, lr, diagnostics, device):
     dist.all_reduce(memory, op=dist.ReduceOp.MAX)
     names = ("loss_mean", "t_mean", "velocity_rms_mean", "encoder_grad_norm_mean", "flow_head_grad_norm_mean")
     record = dict(zip(names, values.cpu().tolist()))
-    record.update(global_step=step, learning_rate=lr, cuda_allocated_gib=memory[0].item(),
+    record.update(global_step=step, learning_rate=lr, vlm_learning_rate=lr,
+                  flow_head_learning_rate=diagnostics["flow_head_learning_rate"], cuda_allocated_gib=memory[0].item(),
                   cuda_peak_allocated_gib=memory[1].item(), timestamp=datetime.now(timezone.utc).isoformat())
     def append():
         with (run_dir / "train.jsonl").open("a", encoding="utf-8") as stream:
@@ -173,6 +186,7 @@ def main():
         tf.config.set_visible_devices([], "GPU")
         # Prismatic imports can initialize distributed state; NCCL must already be configured.
         from prismatic.training.hybrid_formal import hybrid_learning_rate, build_formal_metadata, prepare_run_manifest, checkpoint_name
+        from prismatic.training.hybrid_formal import set_group_learning_rates
         hybrid_learning_rate(0, base_lr=args.learning_rate, decay_step=args.lr_decay_step, decay_factor=args.lr_decay_factor)
         from hybrid_ddp_smoke import load_assets, gather_report, require_all
         from hybrid_checkpoint_smoke import state_checks
@@ -184,12 +198,14 @@ def main():
         rank, world_size = dist.get_rank(), dist.get_world_size()
         if rank == 0:
             print(json.dumps(dict(world_size=world_size, per_device_batch_size=args.per_device_batch_size,
+                vlm_learning_rate=args.learning_rate, flow_head_learning_rate=args.flow_head_learning_rate,
                 gradient_accumulation_steps=1,
                 effective_global_batch_size=world_size * args.per_device_batch_size)), flush=True)
         torch.manual_seed(args.seed)
         encoder, head, tokenizer, images = load_assets(args.vlm_path, args.hf_config)
         model = HybridFlowTrainingModule(encoder, head).to(device)
         groups = hybrid_parameter_groups(model.encoder, model.flow_head)
+        set_group_learning_rates(groups, vlm_lr=args.learning_rate, flow_head_lr=args.flow_head_learning_rate)
         policy = {name: p.requires_grad for name, p in model.named_parameters()}
         ddp_model = DDP(model, device_ids=[local_rank], output_device=local_rank,
                         find_unused_parameters=False, gradient_as_bucket_view=True)
@@ -200,6 +216,7 @@ def main():
             dataset_key=args.dataset_key,
             world_size=world_size, local_batch_size=args.per_device_batch_size,
             base_learning_rate=args.learning_rate, lr_decay_step=args.lr_decay_step,
+            flow_head_learning_rate=args.flow_head_learning_rate,
             lr_decay_factor=args.lr_decay_factor, image_aug=args.image_aug, shuffle_buffer_size=args.shuffle_buffer_size,
             save_every=args.save_every, log_every=args.log_every, seed=args.seed)
         all_metadata = gather_report(metadata)

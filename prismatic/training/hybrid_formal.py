@@ -54,6 +54,28 @@ def set_optimizer_learning_rate(optimizer, lr):
         group["lr"] = float(lr)
 
 
+def effective_flow_head_learning_rate(base_lr, flow_head_lr=None):
+    _positive_real("learning_rate", base_lr)
+    result = base_lr if flow_head_lr is None else flow_head_lr
+    _positive_real("flow_head_learning_rate", result)
+    return float(result)
+
+
+def set_group_learning_rates(groups, *, vlm_lr, flow_head_lr):
+    _positive_real("vlm_lr", vlm_lr)
+    _positive_real("flow_head_lr", flow_head_lr)
+    rates = {"vlm": float(vlm_lr), "flow_head": float(flow_head_lr)}
+    for group in groups:
+        if not isinstance(group.get("lr_role"), str) or group["lr_role"] not in rates:
+            raise ValueError(f"Missing or unknown optimizer lr_role: {group.get('lr_role')}")
+    for group in groups:
+        group["lr"] = rates[group["lr_role"]]
+
+
+def set_optimizer_learning_rates(optimizer, *, vlm_lr, flow_head_lr):
+    set_group_learning_rates(optimizer.param_groups, vlm_lr=vlm_lr, flow_head_lr=flow_head_lr)
+
+
 def normalization_metadata(statistics):
     """The exact four float32 vectors used by HybridZScoreNormalizer."""
     result = {}
@@ -97,6 +119,7 @@ def validate_normalization_metadata(expected, actual, *, atol=1e-5, rtol=1e-5):
 def build_formal_metadata(*, source_splits, statistics, max_steps, world_size=4, local_batch_size=1,
                           dataset_key=DEFAULT_HYBRID_DATASET_KEY,
                           base_learning_rate=1e-6, lr_decay_step=30000, lr_decay_factor=.1,
+                          flow_head_learning_rate=None,
                           image_aug=True, shuffle_buffer_size=10000, save_every=10000, log_every=20, seed=7):
     hybrid_learning_rate(0, base_lr=base_learning_rate, decay_step=lr_decay_step, decay_factor=lr_decay_factor)
     for name, value in (("max_steps", max_steps), ("shuffle_buffer_size", shuffle_buffer_size),
@@ -110,7 +133,9 @@ def build_formal_metadata(*, source_splits, statistics, max_steps, world_size=4,
         raise ValueError("Require one distinct ordered source-split string per rank")
     if type(image_aug) is not bool or type(seed) is not int or seed < 0:
         raise ValueError("image_aug must be bool; seed must be a nonnegative integer")
-    return dict(experiment=formal_experiment_name(dataset_key), dataset_key=dataset_key,
+    head_lr = effective_flow_head_learning_rate(base_learning_rate, flow_head_learning_rate)
+    extra = {"flow_head_learning_rate": head_lr} if head_lr != base_learning_rate else {}
+    return dict(experiment=formal_experiment_name(dataset_key), dataset_key=dataset_key, **extra,
                 world_size=world_size, local_batch_size=local_batch_size,
                 effective_global_batch_size=world_size * local_batch_size,
                 action_horizon=10, action_dim=7, proprio_dim=8, optimizer="AdamW",

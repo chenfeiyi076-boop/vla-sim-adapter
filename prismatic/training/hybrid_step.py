@@ -63,7 +63,7 @@ def hybrid_parameter_groups(encoder, flow_head):
 
     Excluded parameters are retained, with requires_grad=False and stale grads
     cleared. No legacy forward implementation or module is changed/deleted.
-    Both groups use the same AdamW defaults for this smoke, without a LR policy.
+    Both groups retain AdamW defaults; lr_role identifies their independent LR policy.
     """
     encoder_params, flow_params = _hybrid_parameters(encoder, flow_head)
     used = {id(p) for p in encoder_params}
@@ -73,7 +73,8 @@ def hybrid_parameter_groups(encoder, flow_head):
             parameter.grad = None
     for parameter in flow_params:
         parameter.requires_grad_(True)
-    return [{"name": "encoder", "params": encoder_params}, {"name": "flow_head", "params": flow_params}]
+    return [{"name": "encoder", "lr_role": "vlm", "params": encoder_params},
+            {"name": "flow_head", "lr_role": "flow_head", "params": flow_params}]
 
 
 def make_hybrid_smoke_optimizer(encoder, flow_head, *, lr=1e-4):

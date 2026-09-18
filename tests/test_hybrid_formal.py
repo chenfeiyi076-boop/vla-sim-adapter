@@ -135,10 +135,11 @@ def test_physical_batch_metadata_and_startup_log(world_size, batch_size, capsys)
     block = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
                  and "per_device_batch_size" in ast.unparse(n) and ast.unparse(n.test) == "rank == 0")
     exec(compile(ast.Module(body=[block], type_ignores=[]), "startup", "exec"),
-         dict(json=json, rank=0, world_size=world_size, args=SimpleNamespace(per_device_batch_size=batch_size)))
+         dict(json=json, rank=0, world_size=world_size, args=SimpleNamespace(per_device_batch_size=batch_size,
+              learning_rate=1e-6, flow_head_learning_rate=1e-6)))
     assert json.loads(capsys.readouterr().out) == dict(world_size=world_size,
         per_device_batch_size=batch_size, gradient_accumulation_steps=1,
-        effective_global_batch_size=world_size * batch_size)
+        effective_global_batch_size=world_size * batch_size, vlm_learning_rate=1e-6, flow_head_learning_rate=1e-6)
 
 
 @pytest.mark.parametrize("batch_size", [0, -1])
@@ -168,7 +169,8 @@ def test_continuous_loop_and_100_step_schedule(monkeypatch, start, log_every, ba
     monkeypatch.setitem(sys.modules, "prismatic.training.hybrid_formal", formal)
     rates, forwards, logs, saves = [], [], [], []
     logged_rates = {}
-    optimizer = SimpleNamespace(param_groups=[{"lr": 0}, {"lr": 0}], zero_grad=lambda **kw: None)
+    optimizer = SimpleNamespace(param_groups=[{"lr": 0, "lr_role": "vlm"},
+        {"lr": 0, "lr_role": "flow_head"}], zero_grad=lambda **kw: None)
     batch = dict(actions=torch.zeros(batch_size, 10, 7), proprio=torch.zeros(batch_size, 8))
     class Loader:
         iterations = 0
@@ -221,7 +223,7 @@ def test_failed_step_does_not_log_or_checkpoint(monkeypatch):
                            log_every=1, save_every=1, per_device_batch_size=1)
     with pytest.raises(RuntimeError, match="step failed"):
         trainer.training_loop(None, [dict(actions=torch.zeros(1, 10, 7), proprio=torch.zeros(1, 8))], None,
-            SimpleNamespace(param_groups=[{}]), args=args, global_step=0,
+            SimpleNamespace(param_groups=[{"lr_role": "vlm"}]), args=args, global_step=0,
             log_callback=lambda *a: seen.append(a), checkpoint_callback=lambda *a: seen.append(a))
     assert not seen
 

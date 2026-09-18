@@ -136,6 +136,43 @@ that result without substituting accumulation or changing precision/augmentation
 
 ## Outputs and resume
 
+### Optional flow-head learning rate (Spatial controlled experiment)
+
+`--learning-rate` remains the encoder/VLM base LR (default 1e-6).
+`--flow-head-learning-rate` defaults to that value when omitted. Encoder and
+flow-head groups carry `lr_role=vlm` and `lr_role=flow_head`; the same decay step
+and factor apply to each group's own base LR. Completed global_step determines
+the next update's LR: with decay-step 3, updates 1..3 use base rates and update 4
+uses decayed rates. No scheduler object, warmup or freeze stage is introduced.
+
+Rank-zero startup and train.jsonl report `vlm_learning_rate` and
+`flow_head_learning_rate`. The existing log field `learning_rate` equals VLM LR.
+Equal-LR metadata stays unchanged, even when the same head LR is passed explicitly.
+Only differential runs add `flow_head_learning_rate` to metadata;
+`base_learning_rate` remains the VLM base. Changing either base LR is incompatible
+with resume in either direction. Old optimizer states missing lr_role are restored
+using the current groups only after exact parameter-name layout validation; saved
+conflicting roles are rejected. Next-step LR comes from CLI/metadata/global_step,
+not the restored optimizer's possibly pre-boundary LR.
+
+Short CUDA0 Spatial smoke, using a fresh directory (not run on CPU development):
+
+```sh
+CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes=1 --nproc_per_node=1 \
+  vla-scripts/train_hybrid_spatial.py \
+  --vlm-path pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b \
+  --hf-config pretrained_models/configs --data-root /data/x2227/datasets/libero \
+  --dataset-key libero_spatial_no_noops --per-device-batch-size 1 \
+  --learning-rate 1e-6 --flow-head-learning-rate 1e-5 \
+  --run-dir /path/to/runs/hybrid-spatial-differential-lr-smoke \
+  --max-steps 3 --log-every 1
+```
+
+Check both startup/log rates, run_config.json (`base_learning_rate=1e-6`,
+`flow_head_learning_rate=1e-5`), and step-00000003.pt metadata and optimizer roles.
+Use matching settings for resume. Do not resume an old equal-LR run as this
+differential experiment. No non-Spatial experiment is launched by this change.
+
 Rank zero atomically creates run_config.json with the formal metadata: experiment,
 dataset, world/batch dimensions, H/A/P, optimizer, base LR and decay policy,
 augmentation/shuffle settings, source splits, the four float32 normalization

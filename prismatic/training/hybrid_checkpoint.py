@@ -35,6 +35,10 @@ def _module_and_layout(training_model, optimizer):
         if not isinstance(name, str) or not name or name in [g["name"] for g in layout]:
             raise ValueError("Optimizer groups require unique nonempty names")
         layout.append({"name": name, "parameters": [names[id(p)] for p in group["params"]]})
+        if "lr_role" in group:
+            prefix = {"vlm": "encoder.", "flow_head": "flow_head."}.get(group["lr_role"])
+            if prefix is None or not all(names[id(p)].startswith(prefix) for p in group["params"]):
+                raise ValueError("Optimizer lr_role does not match parameter ownership")
     return module, layout
 
 
@@ -129,7 +133,19 @@ def load_hybrid_checkpoint(path, training_model, optimizer, *, expected_metadata
         for key, value in expected_metadata.items():
             if key not in payload["metadata"] or payload["metadata"][key] != value:
                 raise ValueError(f"Checkpoint metadata mismatch: {key}")
+        if "base_learning_rate" in expected_metadata:
+            expected_head = expected_metadata.get("flow_head_learning_rate", expected_metadata["base_learning_rate"])
+            saved_head = payload["metadata"].get("flow_head_learning_rate", payload["metadata"].get("base_learning_rate"))
+            if saved_head != expected_head:
+                raise ValueError("Checkpoint metadata mismatch: flow_head_learning_rate")
     _validate_optimizer_state(payload["optimizer"], layout, payload["global_step"])
+    # Layout/name/order were validated above. Old optimizer states lack lr_role;
+    # restore it from the matching current group, never infer roles from group index.
+    for saved, current in zip(payload["optimizer"]["param_groups"], optimizer.param_groups):
+        if "lr_role" in current:
+            if "lr_role" in saved and saved["lr_role"] != current["lr_role"]:
+                raise ValueError("Checkpoint optimizer lr_role mismatch")
+            saved["lr_role"] = current["lr_role"]
     # All obvious compatibility failures above precede any parameter mutation.
     module.encoder.load_state_dict(payload["encoder"], strict=True)
     module.flow_head.load_state_dict(payload["flow_head"], strict=True)
