@@ -38,9 +38,12 @@ def parse_args(argv=None):
     parser.add_argument("--benchmark-warmup-steps", type=int,
                         help="Opt-in CUDA timing; exclude this many initial updates from throughput")
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--allow-max-steps-extension", action="store_true")
     parser.add_argument("--no-image-aug", dest="image_aug", action="store_false")
     parser.set_defaults(image_aug=True)
     args = parser.parse_args(argv)
+    if args.allow_max_steps_extension and args.resume is None:
+        parser.error("--allow-max-steps-extension requires --resume")
     try:
         args.flow_head_learning_rate = config["effective_flow_head_learning_rate"](
             args.learning_rate, args.flow_head_learning_rate)
@@ -225,10 +228,11 @@ def main():
         if args.resume is not None:
             error = None
             try:
-                restored = load_hybrid_checkpoint(args.resume, ddp_model, optimizer, expected_metadata=metadata)
+                restored = load_hybrid_checkpoint(args.resume, ddp_model, optimizer, expected_metadata=metadata,
+                    allow_max_steps_extension=args.allow_max_steps_extension)
                 global_step = restored["global_step"]
                 if global_step >= args.max_steps:
-                    raise ValueError("Resume global_step must be smaller than max_steps")
+                    raise ValueError("Resume already completed: global_step must be smaller than requested max_steps")
                 if optimizer_step_range(optimizer) != (global_step, global_step):
                     raise ValueError("Restored AdamW state steps do not match global_step")
             except Exception as exc:
@@ -237,7 +241,8 @@ def main():
             if any(errors):
                 raise RuntimeError(f"Formal resume rejected before training: {errors}")
             state_checks(model, optimizer, global_step, device, policy)
-        rank_zero_io(lambda: prepare_run_manifest(args.run_dir, metadata, resume=args.resume is not None))
+        rank_zero_io(lambda: prepare_run_manifest(args.run_dir, metadata, resume=args.resume is not None,
+            allow_max_steps_extension=args.allow_max_steps_extension))
         segment_seed = args.seed + 1000 + rank + global_step
         torch.manual_seed(segment_seed)
         torch.cuda.manual_seed_all(segment_seed)

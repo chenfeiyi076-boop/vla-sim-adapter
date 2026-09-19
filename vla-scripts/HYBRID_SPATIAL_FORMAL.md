@@ -238,3 +238,55 @@ successes/trials/rates and policy-call/action-step totals, plus overall successe
 trials and success rate. Optional JSON output is atomic and refuses an existing
 path. No minimum success threshold is encoded. This phase does not establish
 optimal hyperparameters, convergence or useful policy quality until measured.
+
+## Explicit max_steps extension resume
+
+Resume remains strict by default. Add `--allow-max-steps-extension` together
+with `--resume` to allow a larger planned `--max-steps`. The same maximum is
+ordinary resume; a smaller maximum is rejected. Every other metadata field
+must match, with absent flow-head base LR interpreted as equal to VLM base LR.
+A completed checkpoint may resume only if its global step is below the newly
+requested maximum. Keep every original recipe argument, including save/log
+cadence, batch, dataset, augmentation and LR schedule.
+
+All ranks restore and validate model, AdamW state and global step before rank
+zero validates the existing manifest and atomically updates `run_config.json`.
+A checkpoint validation failure does not update the manifest. Old checkpoint
+files remain unchanged; subsequent checkpoints contain the new maximum.
+`train.jsonl` continues appending at resumed steps. The optional extension
+history file is not implemented. Existing restart data/RNG semantics are
+unchanged; this does not add iterator or RNG checkpointing.
+
+Short server smoke: first run the normal single-GPU command with a fresh run
+folder and `--max-steps 4 --save-every 2 --log-every 1 --lr-decay-step 3`,
+`--learning-rate 1e-6 --flow-head-learning-rate 1e-5`, batch 1. Repeat the exact
+command with only `--max-steps 6` changed and add:
+
+```bash
+--resume <smoke-run>/checkpoints/step-00000004.pt --allow-max-steps-extension
+```
+
+Verify restored optimizer/global step 4, continued updates 5 and 6 at the
+original decayed LRs, final checkpoint metadata max_steps=6, original checkpoint
+metadata max_steps=4, and manifest max_steps=6. No CUDA smoke was run locally.
+
+For the existing constant-LR 10k Spatial run, retain the original asset/data
+paths and all recipe arguments:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc_per_node=4 \
+  vla-scripts/train_hybrid_spatial.py \
+  --vlm-path pretrained_models/prism-qwen25-extra-dinosiglip-224px-0_5b \
+  --hf-config pretrained_models/configs --data-root <original-data-root> \
+  --dataset-key libero_spatial_no_noops --run-dir <original-run-dir> \
+  --per-device-batch-size 6 --max-steps 15000 \
+  --learning-rate 1e-6 --flow-head-learning-rate 1e-5 \
+  --lr-decay-step 7500 --lr-decay-factor 1.0 \
+  --save-every 2000 --log-every 20 --shuffle-buffer-size 10000 --seed 7 \
+  --resume <original-run-dir>/checkpoints/step-00010000.pt \
+  --allow-max-steps-extension
+```
+
+This continues at update 10001 and saves 12000, 14000 and final 15000 without
+rewriting checkpoint 10000. These arguments must match the original recipe;
+the extension flag does not authorize any other changes.

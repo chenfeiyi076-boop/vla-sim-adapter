@@ -178,11 +178,19 @@ def atomic_write_json(path, value, *, overwrite=False):
             os.unlink(temporary)
 
 
-def prepare_run_manifest(run_dir, metadata, *, resume=False):
+def prepare_run_manifest(run_dir, metadata, *, resume=False, allow_max_steps_extension=False):
+    if allow_max_steps_extension and not resume:
+        raise ValueError("Max-steps extension requires resume")
     run_dir = Path(run_dir)
     path = run_dir / "run_config.json"
     if path.exists():
-        if json.loads(path.read_text(encoding="utf-8")) != metadata:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if allow_max_steps_extension:
+            from prismatic.training.hybrid_checkpoint import validate_resume_metadata
+            validate_resume_metadata(existing, metadata, allow_max_steps_extension=True)
+            if existing != metadata:
+                atomic_write_json(path, metadata, overwrite=True)
+        elif existing != metadata:
             raise ValueError("Existing run_config.json is incompatible")
     if not resume and ((run_dir / "train.jsonl").exists()
                        or ((run_dir / "checkpoints").is_dir() and any((run_dir / "checkpoints").iterdir()))):

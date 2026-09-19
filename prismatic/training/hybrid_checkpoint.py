@@ -112,7 +112,34 @@ def save_hybrid_checkpoint(path, training_model, optimizer, *, global_step, meta
             os.unlink(temporary)
 
 
-def load_hybrid_checkpoint(path, training_model, optimizer, *, expected_metadata=None):
+def validate_resume_metadata(checkpoint_metadata, requested_metadata, *, allow_max_steps_extension=False):
+    """Preserve strict resume by default; opt in to a max_steps-only extension."""
+    if type(checkpoint_metadata) is not dict or type(requested_metadata) is not dict:
+        raise ValueError("Resume metadata must be plain dictionaries")
+    if allow_max_steps_extension:
+        saved, requested = dict(checkpoint_metadata), dict(requested_metadata)
+        for metadata in (saved, requested):
+            maximum = metadata.get("max_steps")
+            if type(maximum) is not int or maximum < 1:
+                raise ValueError("Resume metadata max_steps must be a positive integer")
+            if "base_learning_rate" in metadata:
+                metadata.setdefault("flow_head_learning_rate", metadata["base_learning_rate"])
+        if requested.pop("max_steps") < saved.pop("max_steps"):
+            raise ValueError("Resume max_steps cannot decrease")
+        if saved != requested:
+            raise ValueError("Resume metadata mismatch outside max_steps")
+        return
+    for key, value in requested_metadata.items():
+        if key not in checkpoint_metadata or checkpoint_metadata[key] != value:
+            raise ValueError(f"Checkpoint metadata mismatch: {key}")
+    if "base_learning_rate" in requested_metadata:
+        expected_head = requested_metadata.get("flow_head_learning_rate", requested_metadata["base_learning_rate"])
+        saved_head = checkpoint_metadata.get("flow_head_learning_rate", checkpoint_metadata.get("base_learning_rate"))
+        if saved_head != expected_head:
+            raise ValueError("Checkpoint metadata mismatch: flow_head_learning_rate")
+
+
+def load_hybrid_checkpoint(path, training_model, optimizer, *, expected_metadata=None, allow_max_steps_extension=False):
     """Restore a trusted project checkpoint; return only small version/step/metadata."""
     payload = torch.load(path, map_location="cpu", weights_only=True)
     required = {"format_version", "global_step", "encoder", "flow_head", "optimizer",
@@ -127,17 +154,11 @@ def load_hybrid_checkpoint(path, training_model, optimizer, *, expected_metadata
     module, layout = _module_and_layout(training_model, optimizer)
     if payload["optimizer_parameter_names"] != layout:
         raise ValueError("Optimizer parameter-name layout mismatch (group/name/order)")
+    if allow_max_steps_extension and expected_metadata is None:
+        raise ValueError("Extension requires requested metadata")
     if expected_metadata is not None:
-        if type(expected_metadata) is not dict:
-            raise ValueError("expected_metadata must be a plain dictionary")
-        for key, value in expected_metadata.items():
-            if key not in payload["metadata"] or payload["metadata"][key] != value:
-                raise ValueError(f"Checkpoint metadata mismatch: {key}")
-        if "base_learning_rate" in expected_metadata:
-            expected_head = expected_metadata.get("flow_head_learning_rate", expected_metadata["base_learning_rate"])
-            saved_head = payload["metadata"].get("flow_head_learning_rate", payload["metadata"].get("base_learning_rate"))
-            if saved_head != expected_head:
-                raise ValueError("Checkpoint metadata mismatch: flow_head_learning_rate")
+        validate_resume_metadata(payload["metadata"], expected_metadata,
+                                 allow_max_steps_extension=allow_max_steps_extension)
     _validate_optimizer_state(payload["optimizer"], layout, payload["global_step"])
     # Layout/name/order were validated above. Old optimizer states lack lr_role;
     # restore it from the matching current group, never infer roles from group index.
